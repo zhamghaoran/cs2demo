@@ -590,6 +590,11 @@ function showRoundDetail(r, targetTeam) {
       ${a.tactic ? `<div style="margin-top:6px;">战术执行：${escapeHTML(a.tactic)}</div>` : ''}
       ${a.mistake ? `<div style="margin-top:4px;color:var(--bad);">失误：${escapeHTML(a.mistake)}</div>` : ''}
       ${a.clutch ? `<div style="margin-top:4px;color:var(--warn);">残局：${escapeHTML(a.clutch)}</div>` : ''}
+      ${a.grenade_eval ? `<div style="margin-top:4px;"><span style="color:var(--accent);">默认道具：</span>${escapeHTML(a.grenade_eval)}</div>` : ''}
+      ${a.map_control ? `<div style="margin-top:4px;"><span style="color:var(--accent);">地图控制：</span>${escapeHTML(a.map_control)}</div>` : ''}
+      ${a.utility_assist ? `<div style="margin-top:4px;"><span style="color:var(--accent);">辅助道具：</span>${escapeHTML(a.utility_assist)}</div>` : ''}
+      ${a.opponent_predict ? `<div style="margin-top:4px;"><span style="color:var(--accent);">对手预判：</span>${escapeHTML(a.opponent_predict)}</div>` : ''}
+      ${a.adjustment ? `<div style="margin-top:4px;"><span style="color:var(--accent);">动态调整：</span>${escapeHTML(a.adjustment)}</div>` : ''}
     </div>`;
   }
   $("round-detail").innerHTML = html;
