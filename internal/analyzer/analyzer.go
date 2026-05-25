@@ -217,6 +217,11 @@ func normalizeTerms(r *domain.AnalysisReport) {
 		r.RoundAnalyses[i].Tactic = cleanTerms(r.RoundAnalyses[i].Tactic)
 		r.RoundAnalyses[i].Mistake = cleanTerms(r.RoundAnalyses[i].Mistake)
 		r.RoundAnalyses[i].Clutch = cleanTerms(r.RoundAnalyses[i].Clutch)
+		r.RoundAnalyses[i].GrenadeEval = cleanTerms(r.RoundAnalyses[i].GrenadeEval)
+		r.RoundAnalyses[i].MapControl = cleanTerms(r.RoundAnalyses[i].MapControl)
+		r.RoundAnalyses[i].UtilityAssist = cleanTerms(r.RoundAnalyses[i].UtilityAssist)
+		r.RoundAnalyses[i].OpponentPredict = cleanTerms(r.RoundAnalyses[i].OpponentPredict)
+		r.RoundAnalyses[i].Adjustment = cleanTerms(r.RoundAnalyses[i].Adjustment)
 	}
 }
 
@@ -234,6 +239,11 @@ const systemPrompt = `你是一名资深的 CS2 教练，给中高级玩家做�
       "tactic": "<战术执行评注：先指出本回合全队战术意图（例如：T 方爆 A / 假 B 真 A / 中路控制 / 双 split），再说你在这个意图里扮演了什么角色、有没有跟上队友节奏。必须引用具体地图位置（A 大坑、B 门、香蕉道、A 小屋等）和队友动作（谁先死在哪、谁安弹、进攻方向）>",
       "mistake": "<具体失误：例如：队友打 A，你单走 B 道；爆点后你没跟进；CT 半场提前压点被秒>",
       "clutch": "<残局思路评注：站位、分散对手、打时间、利用炸弹时间等>",
+      "grenade_eval":     "<默认道具评价：基于 grenades[] 数据，逐颗点评：道具类型/投出位置/落点/造成伤害/影响人数。区分'到位'（落点封死关键视野/伤害>20/闪到 2+ 敌人）和'浪费'（投到空气/闪到队友/位置错误）。如果 grenades 为空，写'本回合无道具使用'>",
+      "map_control":      "<回合中地图控制：基于 position_track 时间序列和 zone_occupancy 占比，分析你的走位轨迹。要点：① 是否抢到关键控点（中路/A 长/香蕉道）；② zone 切换是否随团队节奏；③ control_score 分数解读（>60 高强度控图，30-60 中等，<30 被动卡点）。引用具体时间戳和位置>",
+      "utility_assist":   "<辅助道具使用：基于 flash_assists[] 和 grenades[].enemies_flashed/team_flashed。要点：① 闪盲了几个敌人/时长；② 有没有闪到队友（负面）；③ 闪光时机是否配合队友进攻（爆点前 0.5-2s 是黄金窗口）。如无辅助行为写'本回合无辅助投掷'>",
+      "opponent_predict": "<对面战术预测：基于 opponent_context.predicted_intent 和 evidence，评价你是否预判到了对手意图。要点：① 对手近 3 回合趋势（哪个包点/哪种经济）；② 你本回合站位是否对应该预判；③ 如果预判错了，复盘信号点>",
+      "adjustment":       "<根据对方战术动态调整：评价你和团队对对手意图的应对。要点：① 对手是高经济还是低经济，你的站位/激进度是否匹配；② 对手 rush 时你方是否提前堆点；③ 对手默认时你方是否抢先控图。给出'下次该如何应对'的可执行建议>",
       "verdict": "<执行/失误/亮眼/平淡 中选一个>"
     }
   ],
@@ -247,7 +257,9 @@ const systemPrompt = `你是一名资深的 CS2 教练，给中高级玩家做�
 4. **round_analyses 覆盖 6-10 个关键回合**（首杀/末杀/残局/连续阵亡/经济翻盘/全队战术失败回合），不逐回合列。
 5. **tactic 字段必须包含三要素**：① 全队战术意图（推测：例如"T 方打 A 大坑爆点"）② 你的实际动作 vs 战术意图（执行/脱节/单干）③ 引用至少一个具体位置名 + 至少一个队友名字。
 6. clutch 字段仅当 clutch_situation 非空时才输出。
-7. 用第二人称"你"，直接、专业、不绕弯。中文回答。`
+7. **grenade_eval/map_control/utility_assist/opponent_predict/adjustment 五个新字段必须从对应数据中引用具体数字或位置**：例如 grenade_eval 必须写"在 X 位置投出的烟，造成 N 伤害"，map_control 必须写"control_score=N，主要在 X zone 占 N%"，opponent_predict 必须引用 evidence 中的回合号。**严禁泛泛而谈**。
+8. 如果某个字段对应的数据完全为空（例如本回合 grenades=[]），就写"本回合无 X 数据"，不要瞎编。
+9. 用第二人称"你"，直接、专业、不绕弯。中文回答。`
 
 func buildPrompt(stats domain.MatchStats, baseline domain.ProBaseline, cmp []domain.MetricCompare) string {
 	var b strings.Builder
@@ -348,6 +360,72 @@ func buildPrompt(stats domain.MatchStats, baseline domain.ProBaseline, cmp []dom
 					ws = append(ws, tag)
 				}
 				parts = append(parts, "你的击杀:["+strings.Join(ws, ",")+"]")
+			}
+			if r.TargetActions != nil {
+				if len(r.TargetActions.Grenades) > 0 {
+					gtags := []string{}
+					for _, g := range r.TargetActions.Grenades {
+						tag := fmt.Sprintf("%s@%.0fs", g.Type, g.ThrownAtSec)
+						if g.LandingZone != "" {
+							tag += "→" + g.LandingZone
+						}
+						if g.DamageDealt > 0 {
+							tag += fmt.Sprintf("(伤害%d)", g.DamageDealt)
+						}
+						if g.EnemiesFlashed > 0 {
+							tag += fmt.Sprintf("(闪敌%d", g.EnemiesFlashed)
+							if g.FlashDuration > 0 {
+								tag += fmt.Sprintf(",%.1fs", g.FlashDuration)
+							}
+							tag += ")"
+						}
+						if g.TeamFlashed > 0 {
+							tag += fmt.Sprintf("(闪队%d)", g.TeamFlashed)
+						}
+						gtags = append(gtags, tag)
+					}
+					parts = append(parts, "你的道具:["+strings.Join(gtags, ",")+"]")
+				}
+				if len(r.TargetActions.PositionTrack) > 0 {
+					ps := []string{}
+					for _, ps2 := range r.TargetActions.PositionTrack {
+						ps = append(ps, fmt.Sprintf("%.0fs:%s", ps2.TimeSec, ps2.Zone))
+					}
+					parts = append(parts, "走位:["+strings.Join(ps, "→")+"]")
+				}
+				if len(r.TargetActions.ZoneOccupancy) > 0 {
+					arr := []zonePct{}
+					for z, pct := range r.TargetActions.ZoneOccupancy {
+						arr = append(arr, zonePct{z, pct})
+					}
+					sortByPctDesc(arr)
+					top := []string{}
+					for i, x := range arr {
+						if i >= 3 {
+							break
+						}
+						top = append(top, fmt.Sprintf("%s=%.0f%%", x.z, x.p))
+					}
+					parts = append(parts, fmt.Sprintf("控图分%d|占比[%s]", r.TargetActions.ControlScore, strings.Join(top, ",")))
+				}
+				if len(r.TargetActions.FlashAssists) > 0 {
+					fs := []string{}
+					for _, f := range r.TargetActions.FlashAssists {
+						fs = append(fs, fmt.Sprintf("%s@%s", f.VictimName, f.VictimZone))
+					}
+					parts = append(parts, "你闪到:["+strings.Join(fs, ",")+"]")
+				}
+				if r.TargetActions.UtilityDamage > 0 {
+					parts = append(parts, fmt.Sprintf("道具伤害%d", r.TargetActions.UtilityDamage))
+				}
+			}
+			if r.OpponentContext != nil {
+				if r.OpponentContext.PredictedIntent != "" {
+					parts = append(parts, "对手预判:["+r.OpponentContext.PredictedIntent+"]")
+				}
+				if r.OpponentContext.PredictionEvidence != "" {
+					parts = append(parts, "依据:["+r.OpponentContext.PredictionEvidence+"]")
+				}
 			}
 			fmt.Fprintln(&b, strings.Join(parts, " | "))
 		}
@@ -667,10 +745,183 @@ func buildOfflineRoundAnalysis(stats domain.MatchStats, rd domain.RoundSummary) 
 		}
 	}
 
+	ra.GrenadeEval = offlineGrenadeEval(rd.TargetActions)
+	ra.MapControl = offlineMapControl(rd.TargetActions)
+	ra.UtilityAssist = offlineUtilityAssist(rd.TargetActions)
+	ra.OpponentPredict = offlineOpponentPredict(rd.OpponentContext)
+	ra.Adjustment = offlineAdjustment(rd, rd.OpponentContext)
+
 	if ra.Tactic == "" && ra.Mistake == "" && ra.Clutch == "" && len(rd.TargetEvents) == 0 {
 		return ra, false
 	}
 	return ra, true
+}
+
+func offlineGrenadeEval(ta *domain.TargetRoundActions) string {
+	if ta == nil || len(ta.Grenades) == 0 {
+		return "本回合无道具使用"
+	}
+	good, waste := 0, 0
+	parts := []string{}
+	for _, g := range ta.Grenades {
+		tag := fmt.Sprintf("%s→%s", grenadeCN(g.Type), g.LandingZone)
+		if g.DamageDealt >= 20 {
+			tag += fmt.Sprintf("(伤害%d，到位)", g.DamageDealt)
+			good++
+		} else if g.EnemiesFlashed >= 2 {
+			tag += fmt.Sprintf("(闪%d敌，到位)", g.EnemiesFlashed)
+			good++
+		} else if g.TeamFlashed >= 1 {
+			tag += fmt.Sprintf("(闪%d队友，浪费)", g.TeamFlashed)
+			waste++
+		} else if g.DamageDealt == 0 && g.EnemiesFlashed == 0 {
+			tag += "(无效果)"
+			waste++
+		} else {
+			tag += "(一般)"
+		}
+		parts = append(parts, tag)
+	}
+	verdict := ""
+	switch {
+	case good >= 2 && waste == 0:
+		verdict = "整体到位"
+	case waste >= good:
+		verdict = "整体浪费多于到位"
+	default:
+		verdict = "效果一般"
+	}
+	return strings.Join(parts, "；") + "；" + verdict
+}
+
+func offlineMapControl(ta *domain.TargetRoundActions) string {
+	if ta == nil || (len(ta.ZoneOccupancy) == 0 && len(ta.PositionTrack) == 0) {
+		return "本回合走位数据不足"
+	}
+	level := "被动卡点"
+	switch {
+	case ta.ControlScore >= 60:
+		level = "高强度控图"
+	case ta.ControlScore >= 30:
+		level = "中等控图"
+	}
+	arr := []zonePct{}
+	for z, p := range ta.ZoneOccupancy {
+		arr = append(arr, zonePct{z, p})
+	}
+	sortByPctDesc(arr)
+	tops := []string{}
+	for i, x := range arr {
+		if i >= 2 {
+			break
+		}
+		tops = append(tops, fmt.Sprintf("%s占%.0f%%", x.z, x.p))
+	}
+	out := fmt.Sprintf("控图分 %d（%s）", ta.ControlScore, level)
+	if len(tops) > 0 {
+		out += "，主要在 " + strings.Join(tops, "/")
+	}
+	if len(ta.PositionTrack) >= 2 {
+		first := ta.PositionTrack[0]
+		last := ta.PositionTrack[len(ta.PositionTrack)-1]
+		if first.Zone != last.Zone {
+			out += fmt.Sprintf("，从%s移动到%s", first.Zone, last.Zone)
+		} else {
+			out += fmt.Sprintf("，全程蹲在%s", first.Zone)
+		}
+	}
+	return out
+}
+
+func offlineUtilityAssist(ta *domain.TargetRoundActions) string {
+	if ta == nil {
+		return "本回合无辅助投掷"
+	}
+	enemyFlashed, teamFlashed := 0, 0
+	for _, g := range ta.Grenades {
+		enemyFlashed += g.EnemiesFlashed
+		teamFlashed += g.TeamFlashed
+	}
+	if enemyFlashed == 0 && teamFlashed == 0 && len(ta.FlashAssists) == 0 && ta.UtilityDamage == 0 {
+		return "本回合无辅助投掷行为"
+	}
+	parts := []string{}
+	if enemyFlashed > 0 {
+		parts = append(parts, fmt.Sprintf("闪到敌方 %d 人次", enemyFlashed))
+	}
+	if teamFlashed > 0 {
+		parts = append(parts, fmt.Sprintf("闪到队友 %d 人次（负面）", teamFlashed))
+	}
+	if ta.UtilityDamage > 0 {
+		parts = append(parts, fmt.Sprintf("投掷伤害 %d", ta.UtilityDamage))
+	}
+	verdict := ""
+	switch {
+	case teamFlashed > enemyFlashed:
+		verdict = "扰队友多于扰对手，时机/角度需要复盘"
+	case enemyFlashed >= 2:
+		verdict = "辅助到位，配合队友推进"
+	case enemyFlashed >= 1 || ta.UtilityDamage >= 30:
+		verdict = "有效辅助"
+	default:
+		verdict = "辅助效果有限"
+	}
+	return strings.Join(parts, "，") + "；" + verdict
+}
+
+func offlineOpponentPredict(oc *domain.OpponentContext) string {
+	if oc == nil {
+		return "对手数据不足，难以做近期趋势预测"
+	}
+	out := oc.PredictedIntent
+	if oc.PredictionEvidence != "" {
+		out += "（依据：" + oc.PredictionEvidence + "）"
+	}
+	return out
+}
+
+func offlineAdjustment(rd domain.RoundSummary, oc *domain.OpponentContext) string {
+	if oc == nil {
+		return "对手节奏未明确，建议默认控图先听枪声判断"
+	}
+	parts := []string{}
+	switch rd.OpponentTeamEcon {
+	case "eco":
+		parts = append(parts, "对手经济局，应主动压点切对方信息，不要给救枪机会")
+	case "force":
+		parts = append(parts, "对手强起，会集中一路 rush，CT 提前堆点听 rush 路线")
+	case "full":
+		parts = append(parts, "对手满装，会执行完整战术，控好默认+留烟应对包点")
+	case "semi":
+		parts = append(parts, "对手半起，进攻欲望中等，关注首接触点位")
+	}
+	intent := strings.ToLower(oc.PredictedIntent)
+	switch {
+	case strings.Contains(intent, "压 a") || strings.Contains(intent, "打 a"):
+		parts = append(parts, "对手近期压 A，CT 半场 A 多堆 1 人 + 留烟封 A 大坑/A 长")
+	case strings.Contains(intent, "压 b") || strings.Contains(intent, "打 b"):
+		parts = append(parts, "对手近期压 B，CT 半场 B 多堆 1 人 + 香蕉道/B 门留烟")
+	case strings.Contains(intent, "分散") || strings.Contains(intent, "动态"):
+		parts = append(parts, "对手打法分散，建议 1-3-1 默认控图，听首接触再轮转")
+	}
+	if len(parts) == 0 {
+		return "本回合无显著调整空间，按默认体系执行"
+	}
+	return strings.Join(parts, "；")
+}
+
+func grenadeCN(t string) string {
+	switch t {
+	case "smoke":
+		return "烟雾弹"
+	case "flash":
+		return "闪光弹"
+	case "he":
+		return "高爆弹"
+	case "molotov":
+		return "燃烧弹"
+	}
+	return t
 }
 
 func stripZoneCount(zs []string) []string {
@@ -744,4 +995,17 @@ func tail(s string, n int) string {
 		return s
 	}
 	return "..." + s[len(s)-n:]
+}
+
+type zonePct struct {
+	z string
+	p float64
+}
+
+func sortByPctDesc(arr []zonePct) {
+	for i := 1; i < len(arr); i++ {
+		for j := i; j > 0 && arr[j].p > arr[j-1].p; j-- {
+			arr[j], arr[j-1] = arr[j-1], arr[j]
+		}
+	}
 }

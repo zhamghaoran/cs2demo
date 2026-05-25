@@ -98,7 +98,51 @@ type RoundSummary struct {
 	TeamLastAlive   string `json:"team_last_alive,omitempty"`
 	BombSiteZone    string `json:"bomb_site_zone,omitempty"`
 
+	TargetActions   *TargetRoundActions `json:"target_actions,omitempty"`
+	OpponentContext *OpponentContext    `json:"opponent_context,omitempty"`
+
 	Analysis *RoundAnalysis `json:"analysis,omitempty"`
+}
+
+type TargetRoundActions struct {
+	Grenades       []GrenadeEvent     `json:"grenades,omitempty"`
+	PositionTrack  []PositionSample   `json:"position_track,omitempty"`
+	FlashAssists   []FlashAssistEvent `json:"flash_assists,omitempty"`
+	UtilityDamage  int                `json:"utility_damage"`
+	ZoneOccupancy  map[string]float64 `json:"zone_occupancy,omitempty"`
+	ControlScore   int                `json:"control_score"`
+}
+
+type GrenadeEvent struct {
+	Type           string  `json:"type"`
+	ThrownAtSec    float64 `json:"thrown_at_sec"`
+	ThrowerZone    string  `json:"thrower_zone,omitempty"`
+	LandingZone    string  `json:"landing_zone,omitempty"`
+	DamageDealt    int     `json:"damage_dealt,omitempty"`
+	EnemiesFlashed int     `json:"enemies_flashed,omitempty"`
+	TeamFlashed    int     `json:"team_flashed,omitempty"`
+	FlashDuration  float64 `json:"flash_duration,omitempty"`
+}
+
+type FlashAssistEvent struct {
+	Round       int     `json:"round"`
+	TimeSec     float64 `json:"time_sec"`
+	VictimName  string  `json:"victim_name"`
+	VictimZone  string  `json:"victim_zone,omitempty"`
+	AssistedKill bool   `json:"assisted_kill"`
+}
+
+type PositionSample struct {
+	TimeSec float64 `json:"time_sec"`
+	Zone    string  `json:"zone"`
+}
+
+type OpponentContext struct {
+	RecentBombSites    []string `json:"recent_bomb_sites,omitempty"`
+	RecentDeathZones   []string `json:"recent_death_zones,omitempty"`
+	RecentEcons        []string `json:"recent_econs,omitempty"`
+	PredictedIntent    string   `json:"predicted_intent,omitempty"`
+	PredictionEvidence string   `json:"prediction_evidence,omitempty"`
 }
 
 type RoundAnalysis struct {
@@ -153,11 +197,16 @@ type AnalysisReport struct {
 }
 
 type RoundAnalysisOut struct {
-	Round   int    `json:"round"`
-	Tactic  string `json:"tactic"`
-	Mistake string `json:"mistake,omitempty"`
-	Clutch  string `json:"clutch,omitempty"`
-	Verdict string `json:"verdict"`
+	Round           int    `json:"round"`
+	Tactic          string `json:"tactic"`
+	Mistake         string `json:"mistake,omitempty"`
+	Clutch          string `json:"clutch,omitempty"`
+	GrenadeEval     string `json:"grenade_eval,omitempty"`
+	MapControl      string `json:"map_control,omitempty"`
+	UtilityAssist   string `json:"utility_assist,omitempty"`
+	OpponentPredict string `json:"opponent_predict,omitempty"`
+	Adjustment      string `json:"adjustment,omitempty"`
+	Verdict         string `json:"verdict"`
 }
 
 type ReportPoint struct {
