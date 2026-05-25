@@ -1,0 +1,647 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>CS2 Demo AI 复盘 · 不养闲 Agent</title>
+<style>
+  :root {
+    --bg: #0d1117;
+    --panel: #161b22;
+    --border: #30363d;
+    --fg: #e6edf3;
+    --muted: #8b949e;
+    --accent: #f78166;
+    --good: #3fb950;
+    --bad: #f85149;
+    --warn: #d29922;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--fg);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+    line-height: 1.55;
+  }
+  header {
+    padding: 20px 32px;
+    border-bottom: 1px solid var(--border);
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+  }
+  header h1 { margin: 0; font-size: 20px; font-weight: 600; }
+  header .tag { color: var(--accent); font-weight: 500; }
+  main {
+    max-width: 980px;
+    margin: 32px auto;
+    padding: 0 24px;
+  }
+  .card {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 20px 24px;
+    margin-bottom: 20px;
+  }
+  .card h2 { margin: 0 0 16px; font-size: 16px; font-weight: 600; }
+  label { display: block; color: var(--muted); font-size: 13px; margin-bottom: 6px; }
+  input[type="text"], input[type="file"] {
+    width: 100%;
+    padding: 8px 10px;
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    color: var(--fg);
+    font-size: 14px;
+  }
+  input[type="file"]::file-selector-button {
+    background: var(--border); color: var(--fg); border: 0;
+    padding: 6px 12px; border-radius: 4px; margin-right: 12px; cursor: pointer;
+  }
+  .row { display: grid; grid-template-columns: 2fr 1fr auto; gap: 12px; align-items: end; }
+  button {
+    padding: 8px 18px;
+    background: var(--accent);
+    color: #1a1a1a;
+    border: 0;
+    border-radius: 6px;
+    font-size: 14px;
+    font-weight: 600;
+    cursor: pointer;
+  }
+  button:disabled { opacity: 0.5; cursor: wait; }
+  .status-line { font-size: 13px; color: var(--muted); margin-top: 12px; min-height: 18px; }
+  .progress-wrap { margin-top: 12px; }
+  .progress-wrap.hidden { display: none; }
+  .progress-steps {
+    display: flex; justify-content: space-between;
+    font-size: 11px; color: var(--muted);
+    margin-bottom: 6px;
+  }
+  .progress-steps .step { flex: 1; text-align: center; position: relative; }
+  .progress-steps .step.active { color: var(--accent); font-weight: 600; }
+  .progress-steps .step.done { color: var(--good); }
+  .progress-steps .step.failed { color: var(--bad); }
+  .progress-bar {
+    height: 8px;
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    overflow: hidden;
+    position: relative;
+  }
+  .progress-fill {
+    height: 100%;
+    width: 0%;
+    background: linear-gradient(90deg, var(--accent), var(--good));
+    transition: width 0.4s ease;
+    border-radius: 4px;
+  }
+  .progress-fill.failed { background: var(--bad); }
+  .progress-fill.indeterminate {
+    width: 30% !important;
+    background: linear-gradient(90deg, transparent, var(--accent), transparent);
+    animation: progress-slide 1.6s linear infinite;
+  }
+  @keyframes progress-slide {
+    0%   { transform: translateX(-100%); }
+    100% { transform: translateX(400%); }
+  }
+  .progress-meta {
+    font-size: 11px; color: var(--muted); margin-top: 6px;
+    display: flex; justify-content: space-between;
+  }
+  .meta-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; margin-bottom: 16px; }
+  .meta-grid .item {
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 10px 12px;
+  }
+  .meta-grid .item .k { color: var(--muted); font-size: 12px; }
+  .meta-grid .item .v { font-size: 18px; font-weight: 600; margin-top: 4px; }
+  .verdict { font-size: 15px; padding: 12px 14px; background: var(--bg); border-left: 3px solid var(--accent); border-radius: 4px; margin-bottom: 16px; }
+  .score { font-size: 36px; font-weight: 700; color: var(--accent); }
+  .score small { color: var(--muted); font-size: 14px; font-weight: 400; margin-left: 4px; }
+  .points { list-style: none; padding: 0; margin: 0; display: grid; grid-template-columns: 1fr 1fr; gap: 6px; }
+  .points li {
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    padding: 6px 10px;
+    font-size: 12px;
+    line-height: 1.4;
+  }
+  .points li .t { font-weight: 600; font-size: 12px; }
+  .points li .d { color: var(--muted); font-size: 11px; margin-top: 2px; }
+  .points-collapsed { max-height: 100px; overflow: hidden; position: relative; }
+  .points-collapsed::after {
+    content: ""; position: absolute; bottom: 0; left: 0; right: 0; height: 30px;
+    background: linear-gradient(transparent, var(--panel));
+  }
+  .toggle-btn {
+    margin-top: 4px; font-size: 11px; color: var(--muted); cursor: pointer;
+    background: none; border: none; padding: 2px 6px;
+  }
+  .toggle-btn:hover { color: var(--accent); }
+  .compare-table { width: 100%; border-collapse: collapse; }
+  .compare-table th, .compare-table td { padding: 8px 10px; border-bottom: 1px solid var(--border); text-align: left; font-size: 14px; }
+  .compare-table th { color: var(--muted); font-weight: 500; font-size: 12px; }
+  .badge { display: inline-block; padding: 2px 8px; border-radius: 4px; font-size: 12px; }
+  .badge.good { background: rgba(63,185,80,0.15); color: var(--good); }
+  .badge.bad { background: rgba(248,81,73,0.15); color: var(--bad); }
+  .badge.warn { background: rgba(210,153,34,0.15); color: var(--warn); }
+  .section-title { color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: 0.05em; margin: 18px 0 8px; }
+  .hidden { display: none; }
+  .demo-list { list-style: none; padding: 0; margin: 0; }
+  .demo-list li { padding: 8px 12px; border-bottom: 1px solid var(--border); cursor: pointer; font-size: 13px; display: flex; justify-content: space-between; }
+  .demo-list li:hover { background: var(--bg); }
+  .demo-list li .name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 60%; }
+  .demo-list li .st { color: var(--muted); }
+  .footer-aside { color: var(--muted); font-size: 12px; text-align: center; padding: 24px; }
+  .chip {
+    display: inline-block; padding: 4px 10px; margin: 4px 4px 0 0;
+    background: var(--bg); border: 1px solid var(--border); border-radius: 14px;
+    font-size: 12px; cursor: pointer; color: var(--accent);
+  }
+  .chip:hover { background: var(--accent); color: #1a1a1a; }
+  .timeline {
+    display: flex; flex-wrap: wrap; gap: 4px; margin-top: 8px;
+  }
+  .round-cell {
+    flex: 0 0 auto;
+    width: 38px; height: 56px;
+    background: var(--bg); border: 1px solid var(--border);
+    border-radius: 4px;
+    display: flex; flex-direction: column;
+    align-items: center; justify-content: center;
+    font-size: 11px; color: var(--muted);
+    cursor: pointer; position: relative;
+    transition: transform 0.1s;
+  }
+  .round-cell:hover { transform: scale(1.08); border-color: var(--accent); }
+  .round-cell .num { font-weight: 600; color: var(--fg); }
+  .round-cell .kc { color: var(--good); font-weight: 600; }
+  .round-cell.win { border-left: 3px solid var(--good); }
+  .round-cell.loss { border-left: 3px solid var(--bad); }
+  .round-cell.died { background: rgba(248,81,73,0.08); }
+  .round-cell .skull { position: absolute; top: 1px; right: 3px; color: var(--bad); font-size: 9px; }
+  .round-cell .econ { position: absolute; top: 1px; left: 3px; font-size: 9px; color: var(--muted); }
+  .round-cell .clutch { position: absolute; bottom: 1px; right: 3px; font-size: 9px; color: var(--warn); }
+  .tactic-block {
+    margin-top: 10px; padding: 10px 12px;
+    background: rgba(247,129,102,0.06); border-left: 3px solid var(--accent);
+    border-radius: 4px; font-size: 13px;
+  }
+  .tactic-block .label { color: var(--accent); font-weight: 600; font-size: 12px; }
+  .tactic-block .verdict-tag {
+    display: inline-block; padding: 1px 6px; margin-left: 6px;
+    border-radius: 3px; font-size: 11px;
+  }
+  .tactic-block .verdict-亮眼 { background: rgba(63,185,80,0.15); color: var(--good); }
+  .tactic-block .verdict-残局 { background: rgba(210,153,34,0.15); color: var(--warn); }
+  .tactic-block .verdict-失误 { background: rgba(248,81,73,0.15); color: var(--bad); }
+  .tactic-block .verdict-执行 { background: rgba(63,185,80,0.10); color: var(--good); }
+  .tactic-block .verdict-平淡 { background: rgba(139,148,158,0.15); color: var(--muted); }
+  .round-detail {
+    margin-top: 12px; padding: 12px; background: var(--bg);
+    border: 1px solid var(--border); border-radius: 6px;
+    font-size: 13px; min-height: 40px;
+  }
+  .round-detail .head { color: var(--accent); font-weight: 600; margin-bottom: 6px; }
+  .round-detail ul { margin: 4px 0 0 16px; padding: 0; color: var(--muted); }
+  .legend { font-size: 11px; color: var(--muted); margin-top: 8px; }
+  .legend span { display: inline-block; margin-right: 14px; }
+  .legend i { display: inline-block; width: 10px; height: 10px; vertical-align: middle; margin-right: 4px; border-radius: 2px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>CS2 Demo AI 复盘</h1>
+  <span class="tag">▎ 上传 .dem · 解析 · 对比职业基线 · 拿结果闭环</span>
+</header>
+
+<main>
+  <div class="card">
+    <h2>① 上传录像</h2>
+    <form id="upload-form">
+      <div class="row">
+        <div>
+          <label for="file">.dem 文件（最大 1GB）</label>
+          <input id="file" type="file" name="file" accept=".dem" required />
+        </div>
+        <div>
+          <label for="player">目标玩家昵称（区分大小写不敏感，支持模糊）</label>
+          <input id="player" type="text" name="player" placeholder="如 dumau / kyousuke" required />
+        </div>
+        <button type="submit" id="submit-btn">开跑</button>
+      </div>
+      <div class="status-line" id="upload-status"></div>
+      <div class="progress-wrap hidden" id="progress-wrap">
+        <div class="progress-steps">
+          <div class="step" data-step="queued">① 排队</div>
+          <div class="step" data-step="parsing">② 解析 demo</div>
+          <div class="step" data-step="analyzing">③ AI 分析</div>
+          <div class="step" data-step="done">④ 完成</div>
+        </div>
+        <div class="progress-bar"><div class="progress-fill" id="progress-fill"></div></div>
+        <div class="progress-meta">
+          <span id="progress-stage">等待中</span>
+          <span id="progress-elapsed">0s</span>
+        </div>
+      </div>
+    </form>
+  </div>
+
+  <div class="card">
+    <h2>② 历史 Demo</h2>
+    <ul class="demo-list" id="demo-list"><li><span class="name">加载中…</span><span class="st"></span></li></ul>
+  </div>
+
+  <div class="card hidden" id="report-card">
+    <h2>③ AI 复盘报告</h2>
+    <div class="meta-grid" id="match-meta"></div>
+    <div class="verdict" id="verdict"></div>
+    <div style="display:flex;align-items:baseline;gap:8px;margin-bottom:8px;">
+      <div class="score" id="score">--</div><div><small>综合评分 / 100</small></div>
+    </div>
+
+    <div class="section-title">职业基线对比</div>
+    <table class="compare-table"><thead>
+      <tr><th>指标</th><th>你</th><th>职业中位</th><th>评价</th></tr>
+    </thead><tbody id="compare-body"></tbody></table>
+
+    <div class="section-title">回合时间轴（点击查看明细）</div>
+    <div class="timeline" id="timeline"></div>
+    <div class="legend">
+      <span><i style="background:var(--good)"></i>你方胜</span>
+      <span><i style="background:var(--bad)"></i>你方负</span>
+      <span>💀 = 你阵亡</span>
+      <span>★ = 残局</span>
+      <span>左上角 枪/穷/强/半/全 = 经济类型</span>
+      <span>数字 = 你击杀数</span>
+    </div>
+    <div class="round-detail" id="round-detail">点上面的回合方块查看你的击杀方式 / 阵亡时间 / 炸弹状态</div>
+
+    <div class="section-title">亮点</div>
+    <ul class="points" id="strengths"></ul>
+
+    <div class="section-title">短板</div>
+    <ul class="points" id="weaknesses"></ul>
+
+    <div class="section-title">改进建议</div>
+    <ul class="points" id="suggestions"></ul>
+
+    <div class="section-title">职业参考</div>
+    <div id="pro-ref" class="status-line"></div>
+  </div>
+</main>
+
+<div class="footer-aside">▎ 因为信任所以简单 — 没有验证的交付叫自嗨</div>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const form = $("upload-form");
+const submitBtn = $("submit-btn");
+const statusLine = $("upload-status");
+const progressWrap = $("progress-wrap");
+const progressFill = $("progress-fill");
+const progressStage = $("progress-stage");
+const progressElapsed = $("progress-elapsed");
+const stepEls = document.querySelectorAll(".progress-steps .step");
+
+let pollTimer = null;
+let elapsedTimer = null;
+let progressStart = 0;
+
+const STAGE_PROGRESS = {
+  uploading: { from: 0, to: 15, label: "正在上传 .dem" },
+  queued:    { from: 15, to: 25, label: "已入队，等待 worker" },
+  parsing:   { from: 25, to: 60, label: "解析 demo（提取击杀、回合、经济）" },
+  analyzing: { from: 60, to: 95, label: "AI 分析中（对比职业基线 + LLM 点评）" },
+  done:      { from: 100, to: 100, label: "完成" },
+  failed:    { from: 0, to: 0, label: "失败" },
+};
+
+function showProgress() {
+  progressWrap.classList.remove("hidden");
+  progressStart = Date.now();
+  if (elapsedTimer) clearInterval(elapsedTimer);
+  elapsedTimer = setInterval(() => {
+    const s = Math.floor((Date.now() - progressStart) / 1000);
+    progressElapsed.textContent = s + "s";
+  }, 500);
+}
+
+function stopElapsed() {
+  if (elapsedTimer) { clearInterval(elapsedTimer); elapsedTimer = null; }
+}
+
+function setStage(stage, percentOverride) {
+  const cfg = STAGE_PROGRESS[stage] || STAGE_PROGRESS.queued;
+  const pct = percentOverride != null ? percentOverride : cfg.to;
+  progressFill.classList.remove("indeterminate", "failed");
+  progressFill.style.width = pct + "%";
+  progressStage.textContent = cfg.label;
+
+  stepEls.forEach(el => {
+    const s = el.getAttribute("data-step");
+    el.classList.remove("active", "done", "failed");
+    if (stage === "failed") {
+      if (s === "queued") el.classList.add("failed");
+      return;
+    }
+    const order = ["queued", "parsing", "analyzing", "done"];
+    const curIdx = order.indexOf(stage);
+    const sIdx = order.indexOf(s);
+    if (sIdx < curIdx || (stage === "done" && s === "done")) el.classList.add("done");
+    else if (sIdx === curIdx) el.classList.add("active");
+  });
+
+  if (stage === "failed") {
+    progressFill.classList.add("failed");
+    progressFill.style.width = "100%";
+  }
+  if (stage === "parsing" || stage === "analyzing") {
+    progressFill.classList.add("indeterminate");
+  }
+}
+
+function uploadWithProgress(formData) {
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    xhr.open("POST", "/demos");
+    xhr.upload.onprogress = (e) => {
+      if (e.lengthComputable) {
+        const pct = (e.loaded / e.total) * STAGE_PROGRESS.uploading.to;
+        progressFill.classList.remove("indeterminate");
+        progressFill.style.width = pct.toFixed(1) + "%";
+        progressStage.textContent = `正在上传 .dem（${(e.loaded/1048576).toFixed(1)}/${(e.total/1048576).toFixed(1)} MB）`;
+      }
+    };
+    xhr.onload = () => {
+      let data = {};
+      try { data = JSON.parse(xhr.responseText); } catch (_) {}
+      if (xhr.status >= 200 && xhr.status < 300) resolve(data);
+      else reject(new Error(data.error || ("HTTP " + xhr.status)));
+    };
+    xhr.onerror = () => reject(new Error("network error"));
+    xhr.send(formData);
+  });
+}
+
+form.addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const fd = new FormData(form);
+  submitBtn.disabled = true;
+  statusLine.textContent = "";
+  showProgress();
+  setStage("queued", 0);
+  progressStage.textContent = STAGE_PROGRESS.uploading.label;
+  try {
+    const data = await uploadWithProgress(fd);
+    statusLine.textContent = `已入队 demo_id=${data.demo_id.slice(0,8)}…`;
+    setStage("queued");
+    refreshList();
+    startPolling(data.demo_id);
+  } catch (err) {
+    statusLine.textContent = "上传失败: " + err.message;
+    setStage("failed");
+    stopElapsed();
+    submitBtn.disabled = false;
+  }
+});
+
+function startPolling(id) {
+  if (pollTimer) clearInterval(pollTimer);
+  pollTimer = setInterval(async () => {
+    const r = await fetch(`/demos/${id}`).then(x => x.json());
+    let msg = `[${id.slice(0,8)}] 状态 = ${r.status}`;
+    if (r.error) msg += "  错误: " + r.error.slice(0, 200);
+    statusLine.innerHTML = escapeHTML(msg);
+    setStage(r.status);
+
+    if (r.status === "failed" && Array.isArray(r.candidates) && r.candidates.length) {
+      const chips = r.candidates.map(name =>
+        `<span class="chip" data-name="${escapeHTML(name)}">${escapeHTML(name)}</span>`
+      ).join(" ");
+      statusLine.innerHTML += `<div style="margin-top:8px;">demo 中的玩家（点击重新分析）：<br>${chips}</div>`;
+      statusLine.querySelectorAll(".chip").forEach(el => {
+        el.addEventListener("click", () => {
+          $("player").value = el.getAttribute("data-name");
+          form.dispatchEvent(new Event("submit", { cancelable: true }));
+        });
+      });
+    }
+
+    refreshList();
+    if (r.status === "done") {
+      clearInterval(pollTimer); pollTimer = null;
+      stopElapsed();
+      submitBtn.disabled = false;
+      loadReport(id);
+    } else if (r.status === "failed") {
+      clearInterval(pollTimer); pollTimer = null;
+      stopElapsed();
+      submitBtn.disabled = false;
+    }
+  }, 2000);
+}
+
+async function loadReport(id) {
+  progressWrap.classList.add("hidden");
+  const [report, stats] = await Promise.all([
+    fetch(`/demos/${id}/report`).then(r => r.json()),
+    fetch(`/demos/${id}/stats`).then(r => r.json()),
+  ]);
+  renderReport(report, stats);
+}
+
+function renderReport(r, st) {
+  $("report-card").classList.remove("hidden");
+  const t = st.target || {};
+  currentRoundAnalyses = r.round_analyses || [];
+
+  $("match-meta").innerHTML = `
+    <div class="item"><div class="k">地图</div><div class="v">${st.map || "?"}</div></div>
+    <div class="item"><div class="k">比分 (T:CT)</div><div class="v">${st.score_t}:${st.score_ct}</div></div>
+    <div class="item"><div class="k">目标玩家</div><div class="v">${escapeHTML(t.name || "-")}</div></div>
+    <div class="item"><div class="k">K / D / A</div><div class="v">${t.kills}/${t.deaths}/${t.assists}</div></div>
+  `;
+  $("verdict").textContent = r.verdict || "";
+  $("score").textContent = r.overall_score ?? "--";
+
+  $("compare-body").innerHTML = (r.comparison || []).map(c => {
+    const cls = c.verdict.includes("优于") ? "good" :
+                c.verdict.includes("差距") ? "bad" :
+                c.verdict.includes("略低") ? "warn" : "";
+    return `<tr>
+      <td>${escapeHTML(c.metric)}</td>
+      <td>${c.you?.toFixed ? c.you.toFixed(1) : c.you}</td>
+      <td>${c.pro_median?.toFixed ? c.pro_median.toFixed(1) : c.pro_median}</td>
+      <td><span class="badge ${cls}">${escapeHTML(c.verdict)}</span></td>
+    </tr>`;
+  }).join("");
+
+  $("strengths").innerHTML = renderPoints(r.strengths);
+  $("weaknesses").innerHTML = renderPoints(r.weaknesses);
+  $("suggestions").innerHTML = renderPoints(r.suggestions);
+  $("pro-ref").textContent = r.pro_reference || "";
+  renderTimeline(st);
+  $("report-card").scrollIntoView({ behavior: "smooth", block: "start" });
+}
+
+function renderTimeline(st) {
+  const tl = $("timeline");
+  const rounds = st.rounds || [];
+  const targetTeam = (st.target && st.target.team) || "";
+  if (!rounds.length) {
+    tl.innerHTML = `<div style="color:var(--muted);font-size:13px;">无回合数据</div>`;
+    return;
+  }
+  tl.innerHTML = rounds.map(r => {
+    const youWon = r.winner_team && targetTeam && r.winner_team === targetTeam;
+    const cls = ["round-cell"];
+    cls.push(youWon ? "win" : "loss");
+    if (r.target_died) cls.push("died");
+    const econIcon = econShort(r.target_team_econ);
+    const clutchIcon = r.clutch_situation ? "★" : "";
+    return `<div class="${cls.join(' ')}" data-round="${r.number}" title="${escapeHTML(r.target_team_econ || '')}${r.clutch_situation ? ' · ' + r.clutch_situation : ''}">
+      ${econIcon ? `<span class="econ">${econIcon}</span>` : ''}
+      ${r.target_died ? '<span class="skull">💀</span>' : ''}
+      ${clutchIcon ? `<span class="clutch">${clutchIcon}</span>` : ''}
+      <div class="num">R${r.number}</div>
+      <div class="kc">${r.target_kills || 0}</div>
+    </div>`;
+  }).join("");
+  tl.querySelectorAll(".round-cell").forEach(el => {
+    el.addEventListener("click", () => {
+      const n = parseInt(el.getAttribute("data-round"));
+      const r = rounds.find(x => x.number === n);
+      showRoundDetail(r, targetTeam);
+    });
+  });
+}
+
+function econShort(e) {
+  switch (e) {
+    case "pistol": return "枪";
+    case "eco": return "穷";
+    case "force": return "强";
+    case "semi": return "半";
+    case "full": return "全";
+  }
+  return "";
+}
+function econCN(e) {
+  switch (e) {
+    case "pistol": return "手枪局";
+    case "eco": return "经济局";
+    case "force": return "强起局";
+    case "semi": return "半起局";
+    case "full": return "全装局";
+  }
+  return e || "?";
+}
+
+function showRoundDetail(r, targetTeam) {
+  if (!r) return;
+  const youWon = r.winner_team && r.winner_team === targetTeam;
+  const lines = [];
+  lines.push(`回合 ${r.number} · ${r.winner_team || '?'} ${youWon ? '胜（你方）' : '胜（对方）'} · ${r.end_reason || ''}`);
+  const econLine = `经济: 你方=${econCN(r.target_team_econ)}/装备$${r.target_team_equip_value || 0} · 对手=${econCN(r.opponent_team_econ)}/装备$${r.opponent_team_equip_value || 0} · 你起始$${r.target_start_money || 0}`;
+  lines.push(econLine);
+  if (r.first_contact_sec) lines.push(`首次接触: ${r.first_contact_sec.toFixed(1)}s`);
+  lines.push(`你方击杀: ${r.target_kills || 0}`);
+  if (r.team_push_zones && r.team_push_zones.length) lines.push(`队友死亡区域: ${r.team_push_zones.join(', ')}`);
+  if (r.team_first_death) lines.push(`队友首死: ${r.team_first_death}`);
+  lines.push(r.target_died
+    ? `你阵亡: ${(r.target_death_time_sec - r.start_time_sec).toFixed(1)}s @ ${r.target_death_zone || '未知点位'}`
+    : `你存活到回合结束`);
+  if (r.bomb_planted) {
+    lines.push(`炸弹安放${r.bomb_site_zone ? '@' + r.bomb_site_zone : ''}${r.bomb_defused ? ' → 拆除' : ''}`);
+  }
+  if (r.first_kill) {
+    lines.push(`首杀: ${r.first_kill.victim || '?'} · ${r.first_kill.weapon}${r.first_kill.headshot ? ' (HS)' : ''}`);
+  }
+  if (r.clutch_situation) {
+    lines.push(`残局: ${r.clutch_situation} · ${r.clutch_outcome || ''}`);
+  }
+  let html = `<div class="head">${escapeHTML(lines.shift())}</div><ul>`;
+  for (const l of lines) html += `<li>${escapeHTML(l)}</li>`;
+  if (r.target_events && r.target_events.length) {
+    html += `<li>你的击杀:<ul>`;
+    for (const e of r.target_events) {
+      const zone = e.victim_zone ? ` @ ${escapeHTML(e.victim_zone)}` : '';
+      html += `<li>${(e.time_sec - r.start_time_sec).toFixed(1)}s · ${escapeHTML(e.weapon)}${e.headshot ? ' (HS)' : ''} → ${escapeHTML(e.victim || '?')}${zone} · ${e.distance.toFixed(1)}m${e.through_smoke ? ' · 穿烟' : ''}${e.no_scope ? ' · 盲狙' : ''}</li>`;
+    }
+    html += `</ul></li>`;
+  }
+  html += `</ul>`;
+
+  const a = currentRoundAnalyses.find(x => x.round === r.number);
+  if (a) {
+    const v = a.verdict || "平淡";
+    html += `<div class="tactic-block">
+      <span class="label">AI 战术分析</span>
+      <span class="verdict-tag verdict-${escapeHTML(v)}">${escapeHTML(v)}</span>
+      ${a.tactic ? `<div style="margin-top:6px;">战术执行：${escapeHTML(a.tactic)}</div>` : ''}
+      ${a.mistake ? `<div style="margin-top:4px;color:var(--bad);">失误：${escapeHTML(a.mistake)}</div>` : ''}
+      ${a.clutch ? `<div style="margin-top:4px;color:var(--warn);">残局：${escapeHTML(a.clutch)}</div>` : ''}
+    </div>`;
+  }
+  $("round-detail").innerHTML = html;
+}
+
+let currentRoundAnalyses = [];
+
+function renderPoints(list) {
+  if (!list || !list.length) return `<li><div class="t">—</div></li>`;
+  return list.map(p => `
+    <li>
+      <div class="t">${escapeHTML(p.title)}${p.round ? ` <span class="st">· 回合 ${p.round}</span>` : ""}</div>
+      <div class="d">${escapeHTML(p.detail || "")}</div>
+    </li>
+  `).join("");
+}
+
+function escapeHTML(s) {
+  return String(s ?? "").replace(/[&<>"']/g, ch => ({
+    "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"
+  }[ch]));
+}
+
+async function refreshList() {
+  try {
+    const data = await fetch("/demos").then(r => r.json());
+    const list = data.demos || [];
+    $("demo-list").innerHTML = list.length === 0
+      ? `<li><span class="name">还没有 demo，先上传一个</span><span class="st"></span></li>`
+      : list.map(d => `<li data-id="${d.id}">
+          <span class="name">${escapeHTML(d.filename)} · ${escapeHTML(d.target_user)}</span>
+          <span class="st">${escapeHTML(d.status)}</span>
+        </li>`).join("");
+    document.querySelectorAll("#demo-list li[data-id]").forEach(li => {
+      li.addEventListener("click", () => {
+        const id = li.getAttribute("data-id");
+        const status = li.querySelector(".st").textContent;
+        if (status === "done") loadReport(id);
+        else if (status !== "failed") {
+          showProgress();
+          setStage(status);
+          startPolling(id);
+        }
+      });
+    });
+  } catch (e) {
+    $("demo-list").innerHTML = `<li><span class="name">加载列表失败: ${e}</span><span class="st"></span></li>`;
+  }
+}
+
+refreshList();
+setInterval(refreshList, 5000);
+</script>
+</body>
+</html>

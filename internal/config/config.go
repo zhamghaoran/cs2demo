@@ -1,0 +1,65 @@
+package config
+
+import (
+	"os"
+	"strconv"
+)
+
+type Config struct {
+	HTTPAddr    string
+	DataDir     string
+	SQLitePath  string
+	LLMProvider string
+	LLMAPIKey   string
+	LLMBaseURL  string
+	LLMModel    string
+	WorkerCount int
+	MaxUploadMB int
+}
+
+func Load() Config {
+	provider := env("LLM_PROVIDER", "anthropic")
+	apiKey := env("LLM_API_KEY", "")
+	baseURL := env("LLM_BASE_URL", "")
+	if apiKey == "" {
+		switch provider {
+		case "anthropic", "":
+			apiKey = env("ANTHROPIC_AUTH_TOKEN", env("ANTHROPIC_API_KEY", ""))
+			if baseURL == "" {
+				baseURL = env("ANTHROPIC_BASE_URL", "")
+			}
+		case "openai":
+			apiKey = env("OPENAI_API_KEY", "")
+			if baseURL == "" {
+				baseURL = env("OPENAI_BASE_URL", "")
+			}
+		}
+	}
+	return Config{
+		HTTPAddr:    env("HTTP_ADDR", ":8080"),
+		DataDir:     env("DATA_DIR", "./data"),
+		SQLitePath:  env("SQLITE_PATH", "./data/cs2demo.db"),
+		LLMProvider: provider,
+		LLMAPIKey:   apiKey,
+		LLMBaseURL:  baseURL,
+		LLMModel:    env("LLM_MODEL", "claude-opus-4-7"),
+		WorkerCount: envInt("WORKER_COUNT", 2),
+		MaxUploadMB: envInt("MAX_UPLOAD_MB", 1024),
+	}
+}
+
+func env(k, def string) string {
+	if v := os.Getenv(k); v != "" {
+		return v
+	}
+	return def
+}
+
+func envInt(k string, def int) int {
+	if v := os.Getenv(k); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			return n
+		}
+	}
+	return def
+}
