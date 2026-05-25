@@ -236,11 +236,11 @@ const systemPrompt = `你是一名资深的 CS2 教练，给中高级玩家做�
   "round_analyses": [
     {
       "round": <回合号>,
-      "tactic": "<战术执行评注：先指出本回合全队战术意图（例如：T 方爆 A / 假 B 真 A / 中路控制 / 双 split），再说你在这个意图里扮演了什么角色、有没有跟上队友节奏。必须引用具体地图位置（A 大坑、B 门、香蕉道、A 小屋等）和队友动作（谁先死在哪、谁安弹、进攻方向）>",
+      "tactic": "<战术执行评注：先指出本回合全队战术意图（例如：T 方爆 A / 假 B 真 A / 中路控制 / 双 split），再说你在这个意图里扮演了什么角色、有没有跟上队友节奏。必须引用 prompt 里出现过的具体地图位置（不要从其他地图借词）和队友动作（谁先死在哪、谁安弹、进攻方向）>",
       "mistake": "<具体失误：例如：队友打 A，你单走 B 道；爆点后你没跟进；CT 半场提前压点被秒>",
       "clutch": "<残局思路评注：站位、分散对手、打时间、利用炸弹时间等>",
       "grenade_eval":     "<默认道具评价：基于 grenades[] 数据，逐颗点评：道具类型/投出位置/落点/造成伤害/影响人数。区分'到位'（落点封死关键视野/伤害>20/闪到 2+ 敌人）和'浪费'（投到空气/闪到队友/位置错误）。如果 grenades 为空，写'本回合无道具使用'>",
-      "map_control":      "<回合中地图控制：基于 position_track 时间序列和 zone_occupancy 占比，分析你的走位轨迹。要点：① 是否抢到关键控点（中路/A 长/香蕉道）；② zone 切换是否随团队节奏；③ control_score 分数解读（>60 高强度控图，30-60 中等，<30 被动卡点）。引用具体时间戳和位置>",
+      "map_control":      "<回合中地图控制：基于 position_track 时间序列和 zone_occupancy 占比，分析你的走位轨迹。要点：① 是否抢到本图关键控点（zone 名一律用 prompt 里给的）；② zone 切换是否随团队节奏；③ control_score 分数解读（>60 高强度控图，30-60 中等，<30 被动卡点）。引用具体时间戳和位置>",
       "utility_assist":   "<辅助道具使用：基于 flash_assists[] 和 grenades[].enemies_flashed/team_flashed。要点：① 闪盲了几个敌人/时长；② 有没有闪到队友（负面）；③ 闪光时机是否配合队友进攻（爆点前 0.5-2s 是黄金窗口）。如无辅助行为写'本回合无辅助投掷'>",
       "opponent_predict": "<对面战术预测：基于 opponent_context.predicted_intent 和 evidence，评价你是否预判到了对手意图。要点：① 对手近 3 回合趋势（哪个包点/哪种经济）；② 你本回合站位是否对应该预判；③ 如果预判错了，复盘信号点>",
       "adjustment":       "<根据对方战术动态调整：评价你和团队对对手意图的应对。要点：① 对手是高经济还是低经济，你的站位/激进度是否匹配；② 对手 rush 时你方是否提前堆点；③ 对手默认时你方是否抢先控图。给出'下次该如何应对'的可执行建议>",
@@ -645,7 +645,6 @@ func ruleBasedRoundAnalyses(stats domain.MatchStats) []domain.RoundAnalysisOut {
 	}
 	return out
 }
-
 func buildOfflineRoundAnalysis(stats domain.MatchStats, rd domain.RoundSummary) (domain.RoundAnalysisOut, bool) {
 	myEcon := econCN(rd.TargetTeamEcon)
 	oppEcon := econCN(rd.OpponentTeamEcon)
@@ -749,7 +748,7 @@ func buildOfflineRoundAnalysis(stats domain.MatchStats, rd domain.RoundSummary) 
 	ra.MapControl = offlineMapControl(rd.TargetActions)
 	ra.UtilityAssist = offlineUtilityAssist(rd.TargetActions)
 	ra.OpponentPredict = offlineOpponentPredict(rd.OpponentContext)
-	ra.Adjustment = offlineAdjustment(rd, rd.OpponentContext)
+	ra.Adjustment = offlineAdjustment(stats.Map, rd, rd.OpponentContext)
 
 	if ra.Tactic == "" && ra.Mistake == "" && ra.Clutch == "" && len(rd.TargetEvents) == 0 {
 		return ra, false
@@ -880,10 +879,11 @@ func offlineOpponentPredict(oc *domain.OpponentContext) string {
 	return out
 }
 
-func offlineAdjustment(rd domain.RoundSummary, oc *domain.OpponentContext) string {
+func offlineAdjustment(mapName string, rd domain.RoundSummary, oc *domain.OpponentContext) string {
 	if oc == nil {
 		return "对手节奏未明确，建议默认控图先听枪声判断"
 	}
+	mz := mapZoneNames(mapName)
 	parts := []string{}
 	switch rd.OpponentTeamEcon {
 	case "eco":
@@ -898,9 +898,9 @@ func offlineAdjustment(rd domain.RoundSummary, oc *domain.OpponentContext) strin
 	intent := strings.ToLower(oc.PredictedIntent)
 	switch {
 	case strings.Contains(intent, "压 a") || strings.Contains(intent, "打 a"):
-		parts = append(parts, "对手近期压 A，CT 半场 A 多堆 1 人 + 留烟封 A 大坑/A 长")
+		parts = append(parts, fmt.Sprintf("对手近期压 A，CT 半场 A 多堆 1 人 + 留烟封 %s", mz.aChoke))
 	case strings.Contains(intent, "压 b") || strings.Contains(intent, "打 b"):
-		parts = append(parts, "对手近期压 B，CT 半场 B 多堆 1 人 + 香蕉道/B 门留烟")
+		parts = append(parts, fmt.Sprintf("对手近期压 B，CT 半场 B 多堆 1 人 + %s 留烟", mz.bChoke))
 	case strings.Contains(intent, "分散") || strings.Contains(intent, "动态"):
 		parts = append(parts, "对手打法分散，建议 1-3-1 默认控图，听首接触再轮转")
 	}
@@ -908,6 +908,34 @@ func offlineAdjustment(rd domain.RoundSummary, oc *domain.OpponentContext) strin
 		return "本回合无显著调整空间，按默认体系执行"
 	}
 	return strings.Join(parts, "；")
+}
+
+type mapZoneRefs struct {
+	aChoke string // A 路关键封烟点
+	bChoke string // B 路关键封烟点
+}
+
+func mapZoneNames(mapName string) mapZoneRefs {
+	m := strings.ToLower(strings.TrimPrefix(strings.ToLower(mapName), "de_"))
+	switch m {
+	case "dust2":
+		return mapZoneRefs{aChoke: "A 长/A 大坑", bChoke: "B 隧道/B 门"}
+	case "mirage":
+		return mapZoneRefs{aChoke: "A 短/A 大坑", bChoke: "B 公寓/B 门"}
+	case "inferno":
+		return mapZoneRefs{aChoke: "A 短/A 木", bChoke: "香蕉道/B 阳台"}
+	case "nuke":
+		return mapZoneRefs{aChoke: "外场/A 平台", bChoke: "B 下层入口"}
+	case "ancient":
+		return mapZoneRefs{aChoke: "A 大房/A 坡道", bChoke: "B 坡/B 底"}
+	case "anubis":
+		return mapZoneRefs{aChoke: "A 街/A 连接", bChoke: "B 水道/广场"}
+	case "overpass":
+		return mapZoneRefs{aChoke: "A 长/A 连接", bChoke: "B 隧道/B 门"}
+	case "vertigo":
+		return mapZoneRefs{aChoke: "A 坡道/A 楼梯", bChoke: "B 坡道/B 入口"}
+	}
+	return mapZoneRefs{aChoke: "A 路关键控点", bChoke: "B 路关键控点"}
 }
 
 func grenadeCN(t string) string {
