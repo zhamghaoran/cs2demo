@@ -1,6 +1,7 @@
 package analyzer
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -104,6 +105,7 @@ func (a *AnthropicClient) callOnce(ctx context.Context, system, user string) (st
 	body := map[string]any{
 		"model":      a.model,
 		"max_tokens": 6000,
+		"stream":     true,
 		"system":     system,
 		"messages": []map[string]any{
 			{"role": "user", "content": user},
@@ -115,6 +117,7 @@ func (a *AnthropicClient) callOnce(ctx context.Context, system, user string) (st
 		return "", err
 	}
 	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "text/event-stream")
 	req.Header.Set("x-api-key", a.apiKey)
 	req.Header.Set("anthropic-version", "2023-06-01")
 
@@ -123,29 +126,55 @@ func (a *AnthropicClient) callOnce(ctx context.Context, system, user string) (st
 		return "", err
 	}
 	defer resp.Body.Close()
-	raw, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode >= 300 {
+		raw, _ := io.ReadAll(resp.Body)
 		return "", fmt.Errorf("anthropic %d: %s", resp.StatusCode, truncate(string(raw), 400))
 	}
-	var parsed struct {
-		Content []struct {
-			Type string `json:"type"`
-			Text string `json:"text"`
-		} `json:"content"`
-		StopReason string `json:"stop_reason"`
-	}
-	if err := json.Unmarshal(raw, &parsed); err != nil {
-		return "", fmt.Errorf("decode: %w (raw=%s)", err, truncate(string(raw), 200))
-	}
+
 	var sb strings.Builder
-	for _, c := range parsed.Content {
-		if c.Type == "text" {
-			sb.WriteString(c.Text)
+	stopReason := ""
+	scanner := bufio.NewScanner(resp.Body)
+	scanner.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
+	for scanner.Scan() {
+		line := scanner.Text()
+		if !strings.HasPrefix(line, "data:") {
+			continue
+		}
+		payload := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
+		if payload == "" || payload == "[DONE]" {
+			continue
+		}
+		var ev struct {
+			Type  string `json:"type"`
+			Delta struct {
+				Type       string `json:"type"`
+				Text       string `json:"text"`
+				StopReason string `json:"stop_reason"`
+			} `json:"delta"`
+		}
+		if err := json.Unmarshal([]byte(payload), &ev); err != nil {
+			continue
+		}
+		switch ev.Type {
+		case "content_block_delta":
+			if ev.Delta.Type == "text_delta" {
+				sb.WriteString(ev.Delta.Text)
+			}
+		case "message_delta":
+			if ev.Delta.StopReason != "" {
+				stopReason = ev.Delta.StopReason
+			}
 		}
 	}
+	if err := scanner.Err(); err != nil {
+		return "", fmt.Errorf("stream read: %w", err)
+	}
 	out := sb.String()
-	if parsed.StopReason == "max_tokens" {
-		return out, &TruncatedError{Got: len(out), StopReason: parsed.StopReason}
+	if stopReason == "max_tokens" {
+		return out, &TruncatedError{Got: len(out), StopReason: stopReason}
+	}
+	if out == "" {
+		return "", fmt.Errorf("empty stream output")
 	}
 	return out, nil
 }
