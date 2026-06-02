@@ -214,3 +214,41 @@ FROM demos ORDER BY created_at DESC LIMIT ?`, limit)
 	}
 	return out, rows.Err()
 }
+
+// ListAllDoneStats 拉取所有 status=done 的 stats_json，给趋势聚合用。
+// 限定 limit 最多 200 场，避免慢查询。
+func (s *Store) ListAllDoneStats(ctx context.Context, limit int) ([]TrendRow, error) {
+	if limit <= 0 {
+		limit = 200
+	}
+	rows, err := s.db.QueryContext(ctx, `
+SELECT id, target_user, stats_json, created_at
+FROM demos
+WHERE status = ? AND stats_json IS NOT NULL AND stats_json != ''
+ORDER BY created_at DESC
+LIMIT ?`, domain.StatusDone, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []TrendRow
+	for rows.Next() {
+		var r TrendRow
+		var raw string
+		if err := rows.Scan(&r.DemoID, &r.TargetUser, &raw, &r.CreatedAt); err != nil {
+			return nil, err
+		}
+		if err := json.Unmarshal([]byte(raw), &r.Stats); err != nil {
+			continue
+		}
+		out = append(out, r)
+	}
+	return out, rows.Err()
+}
+
+type TrendRow struct {
+	DemoID     string
+	TargetUser string
+	Stats      domain.MatchStats
+	CreatedAt  time.Time
+}

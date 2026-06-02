@@ -39,6 +39,7 @@ func main() {
 	srv := &api.Server{
 		Store:          store,
 		Orch:           orch,
+		KB:             kb,
 		MaxUploadBytes: int64(cfg.MaxUploadMB) << 20,
 		WebDir:         "./web",
 	}
@@ -65,3 +66,15 @@ func main() {
 	orch.Shutdown()
 	log.Printf("bye")
 }
+
+/*
+todo 1. 地图位置映射错误
+todo 2.看 ai 是怎么分析和理解道具的
+烟雾弹(封锁对方关键位置视野，阻断对方进攻，扩展自身移动空间，灭火），
+闪光弹（闪常规点位，即使没人也算是有效闪光，闪光助攻），
+手雷（打出伤害，炸烟观察，炸烟完成击杀）
+燃烧弹（常规点位防 rush，已知对方进攻使用燃烧弹放血，烧常规会站人的点位,烧常规点位有没有烧满）
+诱饵弹：TBD
+todo 3.保枪分析
+todo 4. 胜负显示优化，高亮显示胜者比分
+*/

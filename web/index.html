@@ -285,6 +285,21 @@
     </div>
     <div class="round-detail" id="round-detail">点上面的回合方块查看你的击杀方式 / 阵亡时间 / 炸弹状态</div>
 
+    <div class="section-title">枪法画像</div>
+    <div id="aim-eval" class="status-line"></div>
+
+    <div class="section-title">压力下表现</div>
+    <div id="pressure-eval" class="status-line"></div>
+
+    <div class="section-title">团队配合</div>
+    <div id="team-sync-eval" class="status-line"></div>
+
+    <div class="section-title">烟雾覆盖率</div>
+    <div id="smoke-eval" class="status-line"></div>
+
+    <div class="section-title">移动纪律</div>
+    <div id="movement-eval" class="status-line"></div>
+
     <div class="section-title">亮点</div>
     <ul class="points" id="strengths"></ul>
 
@@ -296,6 +311,20 @@
 
     <div class="section-title">职业参考</div>
     <div id="pro-ref" class="status-line"></div>
+  </div>
+
+  <div class="card hidden" id="trend-card">
+    <h2>④ 该玩家多场趋势</h2>
+    <div class="status-line" id="trend-summary"></div>
+    <div class="meta-grid" id="trend-meta" style="margin-top:14px;"></div>
+    <div class="section-title">每场记录</div>
+    <table class="compare-table"><thead>
+      <tr><th>时间</th><th>地图</th><th>角色</th><th>K/D</th><th>ADR</th><th>KAST</th><th>HS%</th><th>结果</th></tr>
+    </thead><tbody id="trend-matches"></tbody></table>
+    <div class="section-title">分地图统计</div>
+    <table class="compare-table"><thead>
+      <tr><th>地图</th><th>场数</th><th>胜率</th><th>平均 ADR</th><th>平均 KAST</th></tr>
+    </thead><tbody id="trend-maps"></tbody></table>
   </div>
 </main>
 
@@ -489,8 +518,62 @@ function renderReport(r, st) {
   $("weaknesses").innerHTML = renderPoints(r.weaknesses);
   $("suggestions").innerHTML = renderPoints(r.suggestions);
   $("pro-ref").textContent = r.pro_reference || "";
+
+  $("aim-eval").textContent = r.aim_eval || "（暂无）";
+  $("pressure-eval").textContent = r.pressure_eval || "（暂无）";
+  $("team-sync-eval").textContent = r.team_sync_eval || "（暂无）";
+  $("smoke-eval").textContent = r.smoke_eval || "（暂无）";
+  $("movement-eval").textContent = r.movement_eval || "（暂无）";
+
   renderTimeline(st);
+  loadTrend(t.name);
   $("report-card").scrollIntoView({ behavior: "smooth", block: "start" });
+}
+
+async function loadTrend(playerName) {
+  const card = $("trend-card");
+  if (!playerName) { card.classList.add("hidden"); return; }
+  try {
+    const resp = await fetch(`/trends?player=${encodeURIComponent(playerName)}`);
+    const data = await resp.json();
+    if (!data.matches_count || data.matches_count < 2) {
+      card.classList.add("hidden");
+      return;
+    }
+    card.classList.remove("hidden");
+    $("trend-summary").textContent = data.verdict || "";
+    $("trend-meta").innerHTML = `
+      <div class="item"><div class="k">场数</div><div class="v">${data.matches_count}</div></div>
+      <div class="item"><div class="k">平均 ADR</div><div class="v">${data.avg_adr?.toFixed?.(1) ?? data.avg_adr}</div></div>
+      <div class="item"><div class="k">平均 KAST</div><div class="v">${data.avg_kast?.toFixed?.(1) ?? data.avg_kast}%</div></div>
+      <div class="item"><div class="k">胜率</div><div class="v">${data.win_rate?.toFixed?.(1) ?? data.win_rate}%</div></div>
+    `;
+    $("trend-matches").innerHTML = (data.matches || []).map(m => {
+      const dt = new Date(m.played_at).toLocaleString("zh-CN", { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" });
+      const cls = m.won ? "good" : "bad";
+      return `<tr>
+        <td>${dt}</td>
+        <td>${escapeHTML(m.map)}</td>
+        <td>${escapeHTML(m.role || "-")}</td>
+        <td>${m.kills}/${m.deaths}</td>
+        <td>${m.adr?.toFixed?.(1) ?? m.adr}</td>
+        <td>${m.kast?.toFixed?.(1) ?? m.kast}%</td>
+        <td>${m.hs_pct?.toFixed?.(1) ?? m.hs_pct}%</td>
+        <td><span class="badge ${cls}">${m.won ? "胜" : "负"}</span></td>
+      </tr>`;
+    }).join("");
+    $("trend-maps").innerHTML = (data.map_stats || []).map(mp => `
+      <tr>
+        <td>${escapeHTML(mp.map)}</td>
+        <td>${mp.played}</td>
+        <td>${mp.win_rate?.toFixed?.(1) ?? mp.win_rate}%</td>
+        <td>${mp.avg_adr?.toFixed?.(1) ?? mp.avg_adr}</td>
+        <td>${mp.avg_kast?.toFixed?.(1) ?? mp.avg_kast}%</td>
+      </tr>
+    `).join("");
+  } catch (e) {
+    card.classList.add("hidden");
+  }
 }
 
 function renderTimeline(st) {

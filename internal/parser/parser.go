@@ -8,9 +8,10 @@ import (
 	"sort"
 	"strings"
 
-	demoinfocs "github.com/markus-wa/demoinfocs-golang/v4/pkg/demoinfocs"
-	"github.com/markus-wa/demoinfocs-golang/v4/pkg/demoinfocs/common"
-	events "github.com/markus-wa/demoinfocs-golang/v4/pkg/demoinfocs/events"
+	demoinfocs "github.com/markus-wa/demoinfocs-golang/v5/pkg/demoinfocs"
+	"github.com/markus-wa/demoinfocs-golang/v5/pkg/demoinfocs/common"
+	events "github.com/markus-wa/demoinfocs-golang/v5/pkg/demoinfocs/events"
+	"github.com/markus-wa/demoinfocs-golang/v5/pkg/demoinfocs/msg"
 
 	"github.com/cs2demo/platform/internal/domain"
 )
@@ -47,25 +48,27 @@ func (p *Parser) Parse(path, targetUser string) (domain.MatchStats, error) {
 	defer parser.Close()
 
 	state := &parseState{
-		targetName:        strings.ToLower(strings.TrimSpace(targetUser)),
-		players:           map[uint64]*domain.PlayerStats{},
-		damage:            map[uint64]int{},
-		kastRound:         map[int]map[uint64]bool{},
-		aliveTargetTeam:   map[int]int{},
-		aliveOpponentTeam: map[int]int{},
-		teamDeathOrder:    map[int][]string{},
-		teamPushZones:     map[int]map[string]int{},
-		targetGrenades:    map[int][]domain.GrenadeEvent{},
-		grenadeByEntity:   map[int]*pendingGrenade{},
-		targetPositions:   map[int][]domain.PositionSample{},
-		lastSampleSec:     map[int]float64{},
-		targetFlashes:     map[int][]domain.FlashAssistEvent{},
-		targetUtilByRound: map[int]int{},
-		targetZoneTime:    map[int]map[string]float64{},
-		lastZoneSampleSec: map[int]float64{},
-		lastZone:          map[int]string{},
+		targetName:         strings.ToLower(strings.TrimSpace(targetUser)),
+		players:            map[uint64]*domain.PlayerStats{},
+		damage:             map[uint64]int{},
+		kastRound:          map[int]map[uint64]bool{},
+		aliveTargetTeam:    map[int]int{},
+		aliveOpponentTeam:  map[int]int{},
+		teamDeathOrder:     map[int][]string{},
+		teamPushZones:      map[int]map[string]int{},
+		targetGrenades:     map[int][]domain.GrenadeEvent{},
+		grenadeByEntity:    map[int]*pendingGrenade{},
+		targetPositions:    map[int][]domain.PositionSample{},
+		lastSampleSec:      map[int]float64{},
+		targetFlashes:      map[int][]domain.FlashAssistEvent{},
+		targetUtilByRound:  map[int]int{},
+		targetZoneTime:     map[int]map[string]float64{},
+		lastZoneSampleSec:  map[int]float64{},
+		lastZone:           map[int]string{},
 		opponentDeathZones: map[int][]string{},
 		opponentBombSites:  map[int]string{},
+		timelines:          map[int]*roundTimelineState{},
+		recentKillTimes:    map[uint64][]float64{},
 	}
 
 	registerHandlers(parser, state)
@@ -74,21 +77,20 @@ func (p *Parser) Parse(path, targetUser string) (domain.MatchStats, error) {
 		return domain.MatchStats{}, fmt.Errorf("parse: %w", err)
 	}
 
-	state.mapName = parser.Header().MapName
 	return state.finalize(parser)
 }
 
 type parseState struct {
-	targetName  string
-	targetID    uint64
-	mapName     string
-	players     map[uint64]*domain.PlayerStats
-	damage      map[uint64]int
-	kastRound   map[int]map[uint64]bool
-	roundIdx    int
-	rounds      []domain.RoundSummary
-	curRound    *domain.RoundSummary
-	matchStart  bool
+	targetName        string
+	targetID          uint64
+	mapName           string
+	players           map[uint64]*domain.PlayerStats
+	damage            map[uint64]int
+	kastRound         map[int]map[uint64]bool
+	roundIdx          int
+	rounds            []domain.RoundSummary
+	curRound          *domain.RoundSummary
+	matchStart        bool
 	aliveTargetTeam   map[int]int
 	aliveOpponentTeam map[int]int
 	clutchTriggered   bool
@@ -98,17 +100,36 @@ type parseState struct {
 	teamDeathOrder    map[int][]string
 	teamPushZones     map[int]map[string]int
 
-	targetGrenades   map[int][]domain.GrenadeEvent
-	grenadeByEntity  map[int]*pendingGrenade
-	targetPositions  map[int][]domain.PositionSample
-	lastSampleSec    map[int]float64
-	targetFlashes    map[int][]domain.FlashAssistEvent
-	targetUtilByRound map[int]int
-	targetZoneTime   map[int]map[string]float64
-	lastZoneSampleSec map[int]float64
-	lastZone         map[int]string
+	targetGrenades     map[int][]domain.GrenadeEvent
+	grenadeByEntity    map[int]*pendingGrenade
+	targetPositions    map[int][]domain.PositionSample
+	lastSampleSec      map[int]float64
+	targetFlashes      map[int][]domain.FlashAssistEvent
+	targetUtilByRound  map[int]int
+	targetZoneTime     map[int]map[string]float64
+	lastZoneSampleSec  map[int]float64
+	lastZone           map[int]string
 	opponentDeathZones map[int][]string
 	opponentBombSites  map[int]string
+
+	timelines       map[int]*roundTimelineState
+	recentKillTimes map[uint64][]float64
+	recentDeaths    map[int][]deathRec
+	smokesByPlayer  map[uint64][]smokeLanding
+}
+
+type deathRec struct {
+	steamID uint64
+	team    common.Team
+	timeSec float64
+	zone    string
+}
+
+type smokeLanding struct {
+	round   int
+	timeSec float64
+	x, y    float64
+	zone    string
 }
 
 type pendingGrenade struct {
@@ -154,16 +175,18 @@ func (s *parseState) markKAST(roundIdx int, id uint64) {
 }
 
 func (s *parseState) zoneAt(p demoinfocs.Parser, x, y float64) string {
-	if s.mapName == "" {
-		s.mapName = p.Header().MapName
-	}
 	return mapZone(s.mapName, x, y)
 }
 
 func registerHandlers(p demoinfocs.Parser, s *parseState) {
+	p.RegisterNetMessageHandler(func(m *msg.CSVCMsg_ServerInfo) {
+		if name := m.GetMapName(); name != "" {
+			s.mapName = name
+		}
+	})
+
 	p.RegisterEventHandler(func(e events.MatchStart) {
 		s.matchStart = true
-		s.mapName = p.Header().MapName
 	})
 
 	p.RegisterEventHandler(func(e events.RoundFreezetimeEnd) {
@@ -200,20 +223,61 @@ func registerHandlers(p demoinfocs.Parser, s *parseState) {
 		s.clutchHero = 0
 		s.clutchVs = 0
 		s.clutchHeroSide = ""
+		tl := s.ensureTimeline(s.roundIdx)
+		tl.startSec = s.curRound.StartTimeSec
 	})
 
 	p.RegisterEventHandler(func(e events.BombPlanted) {
 		if s.curRound != nil {
 			s.curRound.BombPlanted = true
+			zone := ""
 			if e.Player != nil {
 				pos := e.Player.Position()
-				s.curRound.BombSiteZone = s.zoneAt(p, pos.X, pos.Y)
+				zone = s.zoneAt(p, pos.X, pos.Y)
+				s.curRound.BombSiteZone = zone
 			}
+			now := currentTimeSec(p)
+			tl := s.ensureTimeline(s.roundIdx)
+			tl.bombPlantSec = now
+			tl.bombPlanted = true
+			side := ""
+			if e.Player != nil {
+				if e.Player.Team == common.TeamTerrorists {
+					side = "T"
+				} else if e.Player.Team == common.TeamCounterTerrorists {
+					side = "CT"
+				}
+			}
+			detail := "下包"
+			if e.Player != nil {
+				detail = e.Player.Name + " 下包"
+			}
+			s.recordTimelineEvent(s.roundIdx, now, "bomb_plant", detail, side, zone)
 		}
 	})
 
 	p.RegisterEventHandler(func(e events.SmokeStart) {
 		s.recordTargetGrenade(p, "smoke", e.Position.X, e.Position.Y, e.Thrower, e.GrenadeEntityID)
+		now := currentTimeSec(p)
+		zone := s.zoneAt(p, e.Position.X, e.Position.Y)
+		side := ""
+		thrower := ""
+		if e.Thrower != nil {
+			thrower = e.Thrower.Name
+			if e.Thrower.Team == common.TeamTerrorists {
+				side = "T"
+			} else if e.Thrower.Team == common.TeamCounterTerrorists {
+				side = "CT"
+			}
+		}
+		s.recordSmokeLanding(p, e.Thrower, e.Position.X, e.Position.Y, now, zone)
+		if s.curRound != nil {
+			tl := s.ensureTimeline(s.roundIdx)
+			if tl.executeStartSec == 0 && side != "" && tl.startSec > 0 && now-tl.startSec >= 8 {
+				tl.executeStartSec = now
+			}
+			s.recordTimelineEvent(s.roundIdx, now, "smoke", thrower+" 烟雾→"+zone, side, zone)
+		}
 	})
 	p.RegisterEventHandler(func(e events.HeExplode) {
 		s.recordTargetGrenade(p, "he", e.Position.X, e.Position.Y, e.Thrower, e.GrenadeEntityID)
@@ -283,6 +347,15 @@ func registerHandlers(p demoinfocs.Parser, s *parseState) {
 	p.RegisterEventHandler(func(e events.BombDefused) {
 		if s.curRound != nil {
 			s.curRound.BombDefused = true
+			now := currentTimeSec(p)
+			tl := s.ensureTimeline(s.roundIdx)
+			tl.bombDefuseSec = now
+			tl.bombDefused = true
+			detail := "拆除"
+			if e.Player != nil {
+				detail = e.Player.Name + " 拆除"
+			}
+			s.recordTimelineEvent(s.roundIdx, now, "bomb_defuse", detail, "CT", "")
 		}
 	})
 
@@ -298,6 +371,13 @@ func registerHandlers(p demoinfocs.Parser, s *parseState) {
 		}
 		s.curRound.EndReason = roundEndReasonString(e.Reason)
 		s.curRound.EndTimeSec = currentTimeSec(p)
+		tl := s.ensureTimeline(s.roundIdx)
+		tl.endSec = s.curRound.EndTimeSec
+		tl.winnerTeam = s.curRound.WinnerTeam
+		tl.endReason = s.curRound.EndReason
+		s.recordTimelineEvent(s.roundIdx, s.curRound.EndTimeSec, "round_end",
+			fmt.Sprintf("%s胜(%s)", s.curRound.WinnerTeam, s.curRound.EndReason),
+			s.curRound.WinnerTeam, "")
 
 		// 当 target 是 CT 时，BombSiteZone 反映对手 T 的进攻包点；记录到对手时序
 		if s.curRound.BombPlanted && s.curRound.BombSiteZone != "" {
@@ -355,6 +435,26 @@ func registerHandlers(p demoinfocs.Parser, s *parseState) {
 
 		killTime := currentTimeSec(p)
 
+		// 移动开枪检测：CS2 步枪精度阈值约 30 u/s，>40 视作"跑动开枪"
+		killerSpeed := 0.0
+		if e.Killer != nil {
+			killerSpeed = playerSpeed(e.Killer)
+		}
+		whileMoving := killerSpeed > 40
+
+		// trade kill 检测：受害者 5s 内倒下后这一杀是否在 5s 窗口内
+		isTrade := false
+		tradeGap := 0.0
+		if e.Victim != nil {
+			if last := s.lastDeathOfTeammate(e.Victim, killTime); last > 0 {
+				gap := killTime - last
+				if gap >= 0 && gap <= 5.0 {
+					isTrade = true
+					tradeGap = round2(gap)
+				}
+			}
+		}
+
 		if e.Victim != nil {
 			vs := s.playerStats(e.Victim)
 			if vs != nil {
@@ -363,6 +463,7 @@ func registerHandlers(p demoinfocs.Parser, s *parseState) {
 			if s.curRound != nil && e.Killer.SteamID64 == s.targetID {
 				s.curRound.TargetKills++
 			}
+			s.markTeamDeath(e.Victim, killTime)
 		}
 
 		if e.Assister != nil {
@@ -381,6 +482,10 @@ func registerHandlers(p demoinfocs.Parser, s *parseState) {
 			ThroughSmoke: e.ThroughSmoke,
 			NoScope:      e.NoScope,
 			Distance:     killDistance(e.Killer, e.Victim),
+			IsTrade:      isTrade,
+			TradeGapSec:  tradeGap,
+			WhileMoving:  whileMoving,
+			KillerSpeed:  round2(killerSpeed),
 		}
 		if e.Killer != nil {
 			pos := e.Killer.Position()
@@ -449,7 +554,29 @@ func registerHandlers(p demoinfocs.Parser, s *parseState) {
 			}
 			s.curRound.FirstKill = &fk
 			s.curRound.FirstContactSec = killTime - s.curRound.StartTimeSec
+			tl := s.ensureTimeline(s.roundIdx)
+			tl.firstContactSec = killTime
 		}
+
+		// timeline 事件 + 连杀间隔记录
+		killerSide := teamSide(e.Killer)
+		killerName := ""
+		victimName := ""
+		if e.Killer != nil {
+			killerName = e.Killer.Name
+		}
+		if e.Victim != nil {
+			victimName = e.Victim.Name
+		}
+		detail := killerName + "→" + victimName + "(" + wep + ")"
+		if e.IsHeadshot {
+			detail += "[HS]"
+		}
+		if isTrade {
+			detail += fmt.Sprintf("[trade %.1fs]", tradeGap)
+		}
+		s.recordTimelineEvent(s.roundIdx, killTime, "kill", detail, killerSide, ke.KillerZone)
+		s.recentKillTimes[e.Killer.SteamID64] = append(s.recentKillTimes[e.Killer.SteamID64], killTime)
 
 		if e.Killer.SteamID64 == s.targetID {
 			killer.Highlights = append(killer.Highlights, ke)
@@ -475,6 +602,10 @@ func registerHandlers(p demoinfocs.Parser, s *parseState) {
 					case common.TeamTerrorists:
 						s.clutchHeroSide = "T"
 					}
+					tl := s.ensureTimeline(s.roundIdx)
+					tl.clutchStartSec = killTime
+					s.recordTimelineEvent(s.roundIdx, killTime, "clutch_start",
+						fmt.Sprintf("%s 1v%d 残局触发", hero.Name, oppAlive), s.clutchHeroSide, "")
 				}
 			} else if oppAlive == 1 && myAlive >= 1 {
 				hero := findLastAlive(oppTeam)
@@ -488,6 +619,10 @@ func registerHandlers(p demoinfocs.Parser, s *parseState) {
 					case common.TeamTerrorists:
 						s.clutchHeroSide = "T"
 					}
+					tl := s.ensureTimeline(s.roundIdx)
+					tl.clutchStartSec = killTime
+					s.recordTimelineEvent(s.roundIdx, killTime, "clutch_start",
+						fmt.Sprintf("%s 1v%d 残局触发", hero.Name, myAlive), s.clutchHeroSide, "")
 				}
 			}
 		}
@@ -653,8 +788,83 @@ func killDistance(a, b *common.Player) float64 {
 	return math.Sqrt(dx*dx+dy*dy+dz*dz) / 100.0
 }
 
+func playerSpeed(pl *common.Player) float64 {
+	if pl == nil {
+		return 0
+	}
+	pawn := pl.PlayerPawnEntity()
+	if pawn == nil {
+		return 0
+	}
+	val, ok := pawn.PropertyValue("m_vecVelocity")
+	if !ok {
+		return 0
+	}
+	v := val.R3Vec()
+	return math.Sqrt(v.X*v.X + v.Y*v.Y)
+}
+
+func teamSide(pl *common.Player) string {
+	if pl == nil {
+		return ""
+	}
+	switch pl.Team {
+	case common.TeamTerrorists:
+		return "T"
+	case common.TeamCounterTerrorists:
+		return "CT"
+	}
+	return ""
+}
+
+// lastDeathOfTeammate 找到 victim 队友里最近一次死亡时间，用于 trade kill 判定。
+func (s *parseState) lastDeathOfTeammate(victim *common.Player, killTime float64) float64 {
+	if victim == nil {
+		return 0
+	}
+	team := victim.Team
+	last := 0.0
+	for _, ds := range s.recentDeaths[s.roundIdx] {
+		if ds.team == team && ds.timeSec <= killTime && ds.timeSec > last {
+			last = ds.timeSec
+		}
+	}
+	return last
+}
+
+func (s *parseState) markTeamDeath(victim *common.Player, killTime float64) {
+	if victim == nil {
+		return
+	}
+	if s.recentDeaths == nil {
+		s.recentDeaths = map[int][]deathRec{}
+	}
+	s.recentDeaths[s.roundIdx] = append(s.recentDeaths[s.roundIdx], deathRec{
+		steamID: victim.SteamID64,
+		team:    victim.Team,
+		timeSec: killTime,
+		zone:    "",
+	})
+}
+
+// recordSmokeLanding 在 SmokeStart 时记录烟雾落点+投掷者，给 SmokeReport 用。
+func (s *parseState) recordSmokeLanding(p demoinfocs.Parser, thrower *common.Player, x, y, t float64, zone string) {
+	if thrower == nil {
+		return
+	}
+	if s.smokesByPlayer == nil {
+		s.smokesByPlayer = map[uint64][]smokeLanding{}
+	}
+	s.smokesByPlayer[thrower.SteamID64] = append(s.smokesByPlayer[thrower.SteamID64], smokeLanding{
+		round:   s.roundIdx,
+		timeSec: t,
+		x:       x,
+		y:       y,
+		zone:    zone,
+	})
+}
+
 func (s *parseState) finalize(p demoinfocs.Parser) (domain.MatchStats, error) {
-	header := p.Header()
 	totalRounds := len(s.rounds)
 
 	if s.targetID == 0 && s.targetName != "" {
@@ -683,8 +893,8 @@ func (s *parseState) finalize(p demoinfocs.Parser) (domain.MatchStats, error) {
 	}
 
 	stats := domain.MatchStats{
-		Map:         header.MapName,
-		DurationSec: int(header.PlaybackTime.Seconds()),
+		Map:         s.mapName,
+		DurationSec: int(p.CurrentTime().Seconds()),
 		TickRate:    p.TickRate(),
 		RoundsTotal: totalRounds,
 		Rounds:      s.rounds,
@@ -759,6 +969,15 @@ func (s *parseState) finalize(p demoinfocs.Parser) (domain.MatchStats, error) {
 			r.OpponentContext = oc
 		}
 	}
+
+	s.finalizeTimelines(stats.Rounds)
+
+	stats.Target.AimQuality = computeAimQuality(stats.Target, stats.Rounds, s.recentKillTimes[s.targetID])
+	stats.Target.Pressure = computePressureSplit(stats.Target, stats.Rounds, s.targetID, stats.RoundsTotal)
+	stats.TeamSync = computeTeamSync(stats, s)
+	stats.SmokeReport = computeSmokeReport(stats.Map, stats.Target, s.smokesByPlayer[s.targetID])
+	stats.Movement = computeMovementDiscipline(stats.Target, stats.Rounds)
+
 	return stats, nil
 }
 

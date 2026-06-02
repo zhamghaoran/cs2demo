@@ -41,6 +41,7 @@ func (a *Analyzer) Analyze(ctx context.Context, demoID string, stats domain.Matc
 
 	if a.llm == nil {
 		report := offlineReport(demoID, stats, baseline, comparison)
+		fillSummaryEvals(&report, stats)
 		normalizeTerms(&report)
 		return report, nil
 	}
@@ -50,6 +51,7 @@ func (a *Analyzer) Analyze(ctx context.Context, demoID string, stats domain.Matc
 	if err != nil {
 		report := offlineReport(demoID, stats, baseline, comparison)
 		report.Verdict = "[LLM 调用失败，回退离线规则] " + report.Verdict
+		fillSummaryEvals(&report, stats)
 		normalizeTerms(&report)
 		return report, fmt.Errorf("llm call: %w", err)
 	}
@@ -58,6 +60,7 @@ func (a *Analyzer) Analyze(ctx context.Context, demoID string, stats domain.Matc
 	if err != nil {
 		report := offlineReport(demoID, stats, baseline, comparison)
 		report.Verdict = "[LLM 输出无法解析，回退离线规则] " + report.Verdict
+		fillSummaryEvals(&report, stats)
 		normalizeTerms(&report)
 		return report, fmt.Errorf("parse llm json: %w (raw_head=%s ... raw_tail=%s)", err, truncate(raw, 200), tail(raw, 200))
 	}
@@ -69,8 +72,28 @@ func (a *Analyzer) Analyze(ctx context.Context, demoID string, stats domain.Matc
 		report.ProReference = baseline.Notes
 	}
 	mergeOfflineForMissing(&report, stats, baseline)
+	fillSummaryEvals(&report, stats)
 	normalizeTerms(&report)
 	return report, nil
+}
+
+// fillSummaryEvals 用规则补 5 个顶层 eval 字段；若 LLM 已经写了就保留。
+func fillSummaryEvals(r *domain.AnalysisReport, stats domain.MatchStats) {
+	if r.AimEval == "" {
+		r.AimEval = offlineAimEval(stats.Target.AimQuality)
+	}
+	if r.PressureEval == "" {
+		r.PressureEval = offlinePressureEval(stats.Target.Pressure)
+	}
+	if r.TeamSyncEval == "" {
+		r.TeamSyncEval = offlineTeamSyncEval(stats.TeamSync)
+	}
+	if r.SmokeEval == "" {
+		r.SmokeEval = offlineSmokeEval(stats.SmokeReport)
+	}
+	if r.MovementEval == "" {
+		r.MovementEval = offlineMovementEval(stats.Movement)
+	}
 }
 
 func mergeOfflineForMissing(r *domain.AnalysisReport, stats domain.MatchStats, baseline domain.ProBaseline) {
@@ -233,10 +256,15 @@ const systemPrompt = `你是一名资深的 CS2 教练，给中高级玩家做�
   "strengths":    [{"title":"...","detail":"...","round":<可选整数>}],
   "weaknesses":   [{"title":"...","detail":"...","round":<可选整数>}],
   "suggestions":  [{"title":"...","detail":"..."}],
+  "aim_eval":         "<枪法画像评注：基于'枪法画像'段，引用具体距离桶/HS%/最快连杀/首杀对枪胜负，指出强项和短板>",
+  "pressure_eval":    "<高压表现评注：基于'压力下表现'段，对比高压 KAST vs 普通 KAST，点评残局/经济局/赛点表现，连败心态调整建议>",
+  "team_sync_eval":   "<团队配合评注：基于'团队配合'段，引用 trade 率/平均 trade 间隔/孤立死次数，点评跟进意识和最佳搭档>",
+  "smoke_eval":       "<烟雾覆盖率评注：基于'烟雾覆盖率'段，引用准确率/漏掉的关键控点，点评 lineup 熟练度>",
+  "movement_eval":    "<移动纪律评注：基于'移动纪律'段，引用跑动开枪率/早期突进死，点评急停/卡点纪律>",
   "round_analyses": [
     {
       "round": <回合号>,
-      "tactic": "<战术执行评注：先指出本回合全队战术意图（例如：T 方爆 A / 假 B 真 A / 中路控制 / 双 split），再说你在这个意图里扮演了什么角色、有没有跟上队友节奏。必须引用 prompt 里出现过的具体地图位置（不要从其他地图借词）和队友动作（谁先死在哪、谁安弹、进攻方向）>",
+      "tactic": "<战术执行评注：先指出本回合全队战术意图（例如：T 方爆 A / 假 B 真 A / 中路控制 / 双 split），再说你在这个意图里扮演了什么角色、有没有跟上队友节奏。必须引用 prompt 里出现过的具体地图位置（不要从其他地图借词）和队友动作（谁先死在哪、谁安弹、进攻方向）。如果有'阶段=X|节奏=Y'，必须引用并解读>",
       "mistake": "<具体失误：例如：队友打 A，你单走 B 道；爆点后你没跟进；CT 半场提前压点被秒>",
       "clutch": "<残局思路评注：站位、分散对手、打时间、利用炸弹时间等>",
       "grenade_eval":     "<默认道具评价：基于 grenades[] 数据，逐颗点评：道具类型/投出位置/落点/造成伤害/影响人数。区分'到位'（落点封死关键视野/伤害>20/闪到 2+ 敌人）和'浪费'（投到空气/闪到队友/位置错误）。如果 grenades 为空，写'本回合无道具使用'>",
@@ -258,8 +286,9 @@ const systemPrompt = `你是一名资深的 CS2 教练，给中高级玩家做�
 5. **tactic 字段必须包含三要素**：① 全队战术意图（推测：例如"T 方打 A 大坑爆点"）② 你的实际动作 vs 战术意图（执行/脱节/单干）③ 引用至少一个具体位置名 + 至少一个队友名字。
 6. clutch 字段仅当 clutch_situation 非空时才输出。
 7. **grenade_eval/map_control/utility_assist/opponent_predict/adjustment 五个新字段必须从对应数据中引用具体数字或位置**：例如 grenade_eval 必须写"在 X 位置投出的烟，造成 N 伤害"，map_control 必须写"control_score=N，主要在 X zone 占 N%"，opponent_predict 必须引用 evidence 中的回合号。**严禁泛泛而谈**。
-8. 如果某个字段对应的数据完全为空（例如本回合 grenades=[]），就写"本回合无 X 数据"，不要瞎编。
-9. 用第二人称"你"，直接、专业、不绕弯。中文回答。`
+8. **aim_eval/pressure_eval/team_sync_eval/smoke_eval/movement_eval 五个顶层评注必须引用 prompt 里对应章节的具体数字**（距离分布、KAST 对比、trade 率、烟雾准确率、跑动开枪率），如果对应数据缺失就写"本场样本不足以做 X 评估"。
+9. 如果某个字段对应的数据完全为空（例如本回合 grenades=[]），就写"本回合无 X 数据"，不要瞎编。
+10. 用第二人称"你"，直接、专业、不绕弯。中文回答。`
 
 func buildPrompt(stats domain.MatchStats, baseline domain.ProBaseline, cmp []domain.MetricCompare) string {
 	var b strings.Builder
@@ -304,6 +333,55 @@ func buildPrompt(stats domain.MatchStats, baseline domain.ProBaseline, cmp []dom
 	fmt.Fprintf(&b, "\n## 数据对比\n")
 	for _, c := range cmp {
 		fmt.Fprintf(&b, "- %s: 你 %.1f vs 职业 %.1f → %s\n", c.Metric, c.You, c.ProMedian, c.Verdict)
+	}
+
+	if a := stats.Target.AimQuality; a != nil {
+		fmt.Fprintf(&b, "\n## 枪法画像\n")
+		fmt.Fprintf(&b, "距离分布: 近=%d 中=%d 远=%d, 平均距离=%.1fm\n", a.CloseKills, a.MidKills, a.LongKills, a.AvgKillDistance)
+		fmt.Fprintf(&b, "近 HS%%=%.0f%% 远 HS%%=%.0f%%, 多杀回合=%d, 最快连杀=%.2fs\n",
+			a.HSCloseRate, a.HSLongRate, a.MultiKillRounds, a.FastestDoubleSec)
+		fmt.Fprintf(&b, "首杀对枪 胜=%d 负=%d\n", a.OpeningDuelWins, a.OpeningDuelLoss)
+	}
+
+	if p := stats.Target.Pressure; p != nil {
+		fmt.Fprintf(&b, "\n## 压力下表现\n")
+		fmt.Fprintf(&b, "高压回合=%d (KAST %.0f%%) vs 普通回合=%d (KAST %.0f%%)\n",
+			p.HighStakeRounds, p.HighStakeKAST, p.NormalRounds, p.NormalKAST)
+		fmt.Fprintf(&b, "残局打/赢=%d/%d, 经济局击杀=%d, 赛点回合=%d, 最大连败=%d\n",
+			p.ClutchPlayed, p.ClutchWon, p.EcoRoundKills, p.MatchPointRounds, p.LosingStreakMax)
+	}
+
+	if t := stats.TeamSync; t != nil {
+		fmt.Fprintf(&b, "\n## 团队配合\n")
+		fmt.Fprintf(&b, "trade 击杀=%d trade 死亡=%d (trade率%.0f%%), 平均 trade 间隔=%.2fs\n",
+			t.TradeKills, t.TradeDeaths, t.TradeRate, t.AvgTradeGapSec)
+		fmt.Fprintf(&b, "跟进击杀=%d, 孤立死=%d, 全队堆点死回合=%d\n",
+			t.FollowupKills, t.SoloDeaths, t.StackedDeathRounds)
+		if t.BestTradePartner != "" {
+			fmt.Fprintf(&b, "最佳搭档: %s (%d 次同回合配合)\n", t.BestTradePartner, t.BestPartnerCount)
+		}
+	}
+
+	if sr := stats.SmokeReport; sr != nil {
+		fmt.Fprintf(&b, "\n## 烟雾覆盖率\n")
+		fmt.Fprintf(&b, "投出%d颗，命中关键封烟点%d颗(准确率%.0f%%)，漏掉%d个关键控点\n",
+			sr.TotalSmokes, sr.AccurateSmokes, sr.AccuracyPct, sr.KeyChokeMissed)
+		if len(sr.PerSmokeNotes) > 0 {
+			fmt.Fprintf(&b, "明细: ")
+			for i, n := range sr.PerSmokeNotes {
+				if i >= 6 {
+					break
+				}
+				fmt.Fprintf(&b, "[R%d %s→%s %s] ", n.Round, fmt.Sprintf("%.0fs", n.TimeSec), n.LandingZone, n.Verdict)
+			}
+			b.WriteString("\n")
+		}
+	}
+
+	if md := stats.Movement; md != nil {
+		fmt.Fprintf(&b, "\n## 移动纪律\n")
+		fmt.Fprintf(&b, "跑动开枪率=%.0f%%(>30%%偏高), 平均开枪速度=%.0f, 早期突进死=%d, 孤立首死=%d\n",
+			md.MovingKillRate, md.AvgKillerSpeed, md.OvercommitDeaths, md.IsolationDeaths)
 	}
 
 	if len(stats.Rounds) > 0 {
@@ -425,6 +503,24 @@ func buildPrompt(stats domain.MatchStats, baseline domain.ProBaseline, cmp []dom
 				}
 				if r.OpponentContext.PredictionEvidence != "" {
 					parts = append(parts, "依据:["+r.OpponentContext.PredictionEvidence+"]")
+				}
+			}
+			if r.Timeline != nil {
+				tl := r.Timeline
+				parts = append(parts, fmt.Sprintf("阶段=%s|节奏=%s", tl.Phase, tl.PaceProfile))
+				if len(tl.KeyEvents) > 0 {
+					evs := []string{}
+					for i, e := range tl.KeyEvents {
+						if i >= 6 {
+							break
+						}
+						tag := fmt.Sprintf("%.0fs %s", e.TimeSec, e.Kind)
+						if e.Detail != "" {
+							tag += ":" + e.Detail
+						}
+						evs = append(evs, tag)
+					}
+					parts = append(parts, "时间轴:["+strings.Join(evs, "→")+"]")
 				}
 			}
 			fmt.Fprintln(&b, strings.Join(parts, " | "))
