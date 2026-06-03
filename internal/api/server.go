@@ -4,6 +4,7 @@ import (
 	"errors"
 	"net/http"
 	"path/filepath"
+	"strings"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
@@ -11,6 +12,7 @@ import (
 	"github.com/cs2demo/platform/internal/analyzer"
 	"github.com/cs2demo/platform/internal/domain"
 	"github.com/cs2demo/platform/internal/orchestrator"
+	"github.com/cs2demo/platform/internal/parser"
 	"github.com/cs2demo/platform/internal/prokb"
 	"github.com/cs2demo/platform/internal/storage"
 )
@@ -18,6 +20,7 @@ import (
 type Server struct {
 	Store          *storage.Store
 	Orch           *orchestrator.Orchestrator
+	Parser         *parser.Parser
 	KB             prokb.KB
 	MaxUploadBytes int64
 	WebDir         string
@@ -34,8 +37,9 @@ func (s *Server) Router() *gin.Engine {
 		c.Next()
 	})
 
-	r.GET("/healthz", func(c *gin.Context) { c.JSON(200, gin.H{"ok": true}) })
+	r.GET("/healthz", func(c *gin.Context) { c.JSON(http.StatusOK, gin.H{"ok": true}) })
 
+	r.POST("/demos/inspect", s.handleInspectUpload)
 	r.POST("/demos", s.handleUpload)
 	r.GET("/demos", s.handleList)
 	r.GET("/demos/:id", s.handleGet)
@@ -52,34 +56,58 @@ func (s *Server) Router() *gin.Engine {
 }
 
 func (s *Server) handleUpload(c *gin.Context) {
-	file, err := c.FormFile("file")
-	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "missing file field: " + err.Error()})
-		return
-	}
-	target := c.PostForm("player")
+	target := strings.TrimSpace(c.PostForm("player"))
 	if target == "" {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "missing player field (target username)"})
 		return
 	}
 
-	src, err := file.Open()
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "open upload: " + err.Error()})
-		return
-	}
-	defer src.Close()
-
 	id := uuid.NewString()
-	path, err := s.Store.SaveUpload(id, file.Filename, src)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "save upload: " + err.Error()})
-		return
+	filename := ""
+	path := ""
+	uploadID := strings.TrimSpace(c.PostForm("upload_id"))
+	if uploadID != "" {
+		if _, err := uuid.Parse(uploadID); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid upload_id"})
+			return
+		}
+		var err error
+		path, err = s.Store.UploadPath(uploadID)
+		if errors.Is(err, storage.ErrNotFound) {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "upload_id not found; choose the demo file again"})
+			return
+		}
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "load upload: " + err.Error()})
+			return
+		}
+		filename = c.PostForm("filename")
+		if filename == "" {
+			filename = uploadID + ".dem"
+		}
+	} else {
+		file, err := c.FormFile("file")
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "missing file field or upload_id: " + err.Error()})
+			return
+		}
+		src, err := file.Open()
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "open upload: " + err.Error()})
+			return
+		}
+		defer src.Close()
+		path, err = s.Store.SaveUpload(id, file.Filename, src)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "save upload: " + err.Error()})
+			return
+		}
+		filename = file.Filename
 	}
 
 	demo := domain.Demo{
 		ID:         id,
-		Filename:   file.Filename,
+		Filename:   filename,
 		FilePath:   path,
 		TargetUser: target,
 		Status:     domain.StatusQueued,
@@ -95,6 +123,41 @@ func (s *Server) handleUpload(c *gin.Context) {
 		"demo_id":  id,
 		"status":   domain.StatusQueued,
 		"poll_url": "/demos/" + id,
+	})
+}
+
+func (s *Server) handleInspectUpload(c *gin.Context) {
+	if s.Parser == nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "parser not configured"})
+		return
+	}
+	file, err := c.FormFile("file")
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "missing file field: " + err.Error()})
+		return
+	}
+	src, err := file.Open()
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "open upload: " + err.Error()})
+		return
+	}
+	defer src.Close()
+
+	uploadID := uuid.NewString()
+	path, err := s.Store.SaveUpload(uploadID, file.Filename, src)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "save upload: " + err.Error()})
+		return
+	}
+	players, err := s.Parser.ListPlayers(path)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "inspect demo: " + err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{
+		"upload_id": uploadID,
+		"filename":  file.Filename,
+		"players":   players,
 	})
 }
 
@@ -185,14 +248,13 @@ func (s *Server) handleTrends(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{
 			"player":        player,
 			"matches_count": 0,
-			"note":          "暂无该玩家的已完成比赛数据",
+			"note":          "no completed matches found for this player yet",
 		})
 		return
 	}
 	c.JSON(http.StatusOK, trend)
 }
 
-// handlePlayers 列出所有曾出现过的玩家名（target.name 去重），便于前端补全。
 func (s *Server) handlePlayers(c *gin.Context) {
 	rows, err := s.Store.ListAllDoneStats(c.Request.Context(), 200)
 	if err != nil {
@@ -213,7 +275,6 @@ func (s *Server) handlePlayers(c *gin.Context) {
 	for name, n := range seen {
 		out = append(out, entry{Name: name, Matches: n})
 	}
-	// 按场次降序
 	for i := 1; i < len(out); i++ {
 		for j := i; j > 0 && out[j].Matches > out[j-1].Matches; j-- {
 			out[j], out[j-1] = out[j-1], out[j]

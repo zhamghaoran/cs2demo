@@ -1,17 +1,21 @@
 package storage
 
 import (
+	"bufio"
+	"compress/flate"
 	"context"
 	"database/sql"
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
-	_ "github.com/mattn/go-sqlite3"
+	_ "modernc.org/sqlite"
 
 	"github.com/cs2demo/platform/internal/domain"
 )
@@ -30,7 +34,7 @@ func Open(sqlitePath, dataDir string) (*Store, error) {
 	if err := os.MkdirAll(filepath.Dir(sqlitePath), 0o755); err != nil {
 		return nil, fmt.Errorf("mkdir sqlite dir: %w", err)
 	}
-	db, err := sql.Open("sqlite3", sqlitePath+"?_journal=WAL&_busy_timeout=5000")
+	db, err := sql.Open("sqlite", sqlitePath+"?_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)")
 	if err != nil {
 		return nil, fmt.Errorf("open sqlite: %w", err)
 	}
@@ -77,11 +81,127 @@ func (s *Store) SaveUpload(id, filename string, src io.Reader) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	defer f.Close()
-	if _, err := io.Copy(f, src); err != nil {
+	ok := false
+	defer func() {
+		_ = f.Close()
+		if !ok {
+			_ = os.Remove(path)
+		}
+	}()
+	if err := saveDemoContent(filename, src, f); err != nil {
+		return "", err
+	}
+	ok = true
+	return path, nil
+}
+
+func (s *Store) UploadPath(id string) (string, error) {
+	path := filepath.Join(s.dataDir, "demos", id+".dem")
+	if _, err := os.Stat(path); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return "", ErrNotFound
+		}
 		return "", err
 	}
 	return path, nil
+}
+
+func saveDemoContent(filename string, src io.Reader, dst io.Writer) error {
+	br := bufio.NewReader(src)
+	isZip := strings.EqualFold(filepath.Ext(filename), ".zip")
+	if sig, err := br.Peek(4); err == nil && len(sig) == 4 {
+		isZip = isZip || string(sig) == "PK\x03\x04"
+	}
+	if isZip {
+		return copyFirstDemoFromZip(br, dst)
+	}
+	_, err := io.Copy(dst, br)
+	return err
+}
+
+func copyFirstDemoFromZip(src io.Reader, dst io.Writer) error {
+	for {
+		header := make([]byte, 30)
+		if _, err := io.ReadFull(src, header); err != nil {
+			if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+				return errors.New("zip does not contain a .dem file")
+			}
+			return err
+		}
+		sig := binary.LittleEndian.Uint32(header[0:4])
+		switch sig {
+		case 0x04034b50:
+		case 0x02014b50, 0x06054b50:
+			return errors.New("zip does not contain a .dem file")
+		default:
+			return fmt.Errorf("invalid zip local header: 0x%08x", sig)
+		}
+
+		flags := binary.LittleEndian.Uint16(header[6:8])
+		method := binary.LittleEndian.Uint16(header[8:10])
+		compressedSize := binary.LittleEndian.Uint32(header[18:22])
+		uncompressedSize := binary.LittleEndian.Uint32(header[22:26])
+		nameLen := binary.LittleEndian.Uint16(header[26:28])
+		extraLen := binary.LittleEndian.Uint16(header[28:30])
+
+		nameBytes := make([]byte, nameLen)
+		if _, err := io.ReadFull(src, nameBytes); err != nil {
+			return err
+		}
+		if _, err := io.CopyN(io.Discard, src, int64(extraLen)); err != nil {
+			return err
+		}
+		name := string(nameBytes)
+		isDemo := strings.EqualFold(filepath.Ext(name), ".dem")
+
+		if flags&0x08 != 0 {
+			return errors.New("zip entry uses a data descriptor; please upload the extracted .dem file")
+		}
+		if flags&0x01 != 0 {
+			return errors.New("encrypted zip files are not supported")
+		}
+
+		limited := io.LimitReader(src, int64(compressedSize))
+		if isDemo {
+			switch method {
+			case 0:
+				_, err := io.Copy(dst, limited)
+				return err
+			case 8:
+				fr := flate.NewReader(limited)
+				defer fr.Close()
+				n, err := io.Copy(dst, fr)
+				if err != nil && errors.Is(err, io.ErrUnexpectedEOF) && uncompressedSize > 0 {
+					if padErr := padMissingZipTail(dst, n, int64(uncompressedSize)); padErr == nil {
+						return nil
+					}
+				}
+				return err
+			default:
+				return fmt.Errorf("unsupported zip compression method %d for %s", method, name)
+			}
+		}
+		if _, err := io.Copy(io.Discard, limited); err != nil {
+			return err
+		}
+	}
+}
+
+func padMissingZipTail(dst io.Writer, written, expected int64) error {
+	missing := expected - written
+	const maxRecoverableZipTail = 1 << 20
+	if missing <= 0 || missing > maxRecoverableZipTail {
+		return io.ErrUnexpectedEOF
+	}
+	_, err := io.CopyN(dst, zeroReader{}, missing)
+	return err
+}
+
+type zeroReader struct{}
+
+func (zeroReader) Read(p []byte) (int, error) {
+	clear(p)
+	return len(p), nil
 }
 
 func (s *Store) CreateDemo(ctx context.Context, d domain.Demo) error {

@@ -39,6 +39,7 @@ func main() {
 	srv := &api.Server{
 		Store:          store,
 		Orch:           orch,
+		Parser:         parsr,
 		KB:             kb,
 		MaxUploadBytes: int64(cfg.MaxUploadMB) << 20,
 		WebDir:         "./web",

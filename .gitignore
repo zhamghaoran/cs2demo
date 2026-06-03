@@ -1,6 +1,13 @@
 /data/
 /bin/
+.cache/
+.tools/
+.tmp_*/
+*.exe
 *.dem
+*.db
+*.db-shm
+*.db-wal
 .env
 .idea/
 .vscode/
