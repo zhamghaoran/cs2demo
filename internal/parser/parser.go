@@ -37,6 +37,17 @@ type Parser struct{}
 
 func New() *Parser { return &Parser{} }
 
+func (p *Parser) ListPlayers(path string) ([]string, error) {
+	stats, err := p.Parse(path, "\x00__inspect_players__")
+	if tnf, ok := IsTargetNotFound(err); ok {
+		return tnf.Candidates, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return stats.AllPlayers, nil
+}
+
 func (p *Parser) Parse(path, targetUser string) (domain.MatchStats, error) {
 	f, err := os.Open(path)
 	if err != nil {

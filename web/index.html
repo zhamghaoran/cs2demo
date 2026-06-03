@@ -47,7 +47,7 @@
   }
   .card h2 { margin: 0 0 16px; font-size: 16px; font-weight: 600; }
   label { display: block; color: var(--muted); font-size: 13px; margin-bottom: 6px; }
-  input[type="text"], input[type="file"] {
+  input[type="text"], input[type="file"], select {
     width: 100%;
     padding: 8px 10px;
     background: var(--bg);
@@ -60,6 +60,7 @@
     background: var(--border); color: var(--fg); border: 0;
     padding: 6px 12px; border-radius: 4px; margin-right: 12px; cursor: pointer;
   }
+  select { margin-bottom: 8px; color: var(--fg); }
   .row { display: grid; grid-template-columns: 2fr 1fr auto; gap: 12px; align-items: end; }
   button {
     padding: 8px 18px;
@@ -229,12 +230,15 @@
     <form id="upload-form">
       <div class="row">
         <div>
-          <label for="file">.dem 文件（最大 1GB）</label>
-          <input id="file" type="file" name="file" accept=".dem" required />
+          <label for="file">.dem 或 .zip 文件（最大 1GB）</label>
+          <input id="file" type="file" name="file" accept=".dem,.zip,application/zip" required />
         </div>
         <div>
-          <label for="player">目标玩家昵称（区分大小写不敏感，支持模糊）</label>
-          <input id="player" type="text" name="player" placeholder="如 dumau / kyousuke" required />
+          <label for="player-select">目标玩家（选择文件后自动识别）</label>
+          <select id="player-select" disabled>
+            <option value="">先选择 demo 文件</option>
+          </select>
+          <input id="player" type="text" name="player" placeholder="或手动输入玩家昵称" required />
         </div>
         <button type="submit" id="submit-btn">开跑</button>
       </div>
@@ -333,6 +337,9 @@
 <script>
 const $ = (id) => document.getElementById(id);
 const form = $("upload-form");
+const fileInput = $("file");
+const playerInput = $("player");
+const playerSelect = $("player-select");
 const submitBtn = $("submit-btn");
 const statusLine = $("upload-status");
 const progressWrap = $("progress-wrap");
@@ -344,9 +351,10 @@ const stepEls = document.querySelectorAll(".progress-steps .step");
 let pollTimer = null;
 let elapsedTimer = null;
 let progressStart = 0;
+let inspectedUpload = null;
 
 const STAGE_PROGRESS = {
-  uploading: { from: 0, to: 15, label: "正在上传 .dem" },
+  uploading: { from: 0, to: 15, label: "正在上传 .dem/.zip" },
   queued:    { from: 15, to: 25, label: "已入队，等待 worker" },
   parsing:   { from: 25, to: 60, label: "解析 demo（提取击杀、回合、经济）" },
   analyzing: { from: 60, to: 95, label: "AI 分析中（对比职业基线 + LLM 点评）" },
@@ -407,7 +415,7 @@ function uploadWithProgress(formData) {
         const pct = (e.loaded / e.total) * STAGE_PROGRESS.uploading.to;
         progressFill.classList.remove("indeterminate");
         progressFill.style.width = pct.toFixed(1) + "%";
-        progressStage.textContent = `正在上传 .dem（${(e.loaded/1048576).toFixed(1)}/${(e.total/1048576).toFixed(1)} MB）`;
+        progressStage.textContent = `正在上传 .dem/.zip（${(e.loaded/1048576).toFixed(1)}/${(e.total/1048576).toFixed(1)} MB）`;
       }
     };
     xhr.onload = () => {
@@ -421,9 +429,60 @@ function uploadWithProgress(formData) {
   });
 }
 
+async function inspectSelectedDemo() {
+  const file = fileInput.files && fileInput.files[0];
+  inspectedUpload = null;
+  playerSelect.disabled = true;
+  playerSelect.innerHTML = `<option value="">正在解析玩家列表…</option>`;
+  playerInput.value = "";
+  if (!file) {
+    playerSelect.innerHTML = `<option value="">先选择 demo 文件</option>`;
+    return;
+  }
+
+  submitBtn.disabled = true;
+  statusLine.textContent = "正在上传并预解析 demo 玩家列表，较大的 5E zip 可能需要几十秒…";
+  const fd = new FormData();
+  fd.append("file", file);
+  try {
+    const resp = await fetch("/demos/inspect", { method: "POST", body: fd });
+    const data = await resp.json();
+    if (!resp.ok) throw new Error(data.error || ("HTTP " + resp.status));
+    inspectedUpload = data;
+    const players = data.players || [];
+    playerSelect.innerHTML = players.length
+      ? `<option value="">请选择要分析的玩家</option>` + players.map(name => `<option value="${escapeHTML(name)}">${escapeHTML(name)}</option>`).join("")
+      : `<option value="">未识别到玩家，可手动输入</option>`;
+    playerSelect.disabled = players.length === 0;
+    statusLine.textContent = players.length
+      ? `已识别 ${players.length} 名玩家，请从下拉框选择目标。`
+      : "没有识别到玩家，请手动输入昵称后开跑。";
+  } catch (err) {
+    playerSelect.innerHTML = `<option value="">预解析失败，可手动输入</option>`;
+    statusLine.textContent = "预解析失败: " + err.message + "。仍可手动输入玩家昵称后开跑。";
+  } finally {
+    submitBtn.disabled = false;
+  }
+}
+
+fileInput.addEventListener("change", inspectSelectedDemo);
+playerSelect.addEventListener("change", () => {
+  playerInput.value = playerSelect.value;
+});
+
 form.addEventListener("submit", async (e) => {
   e.preventDefault();
-  const fd = new FormData(form);
+  if (playerSelect.value) playerInput.value = playerSelect.value;
+  const fd = new FormData();
+  if (inspectedUpload && inspectedUpload.upload_id) {
+    fd.append("upload_id", inspectedUpload.upload_id);
+    fd.append("filename", inspectedUpload.filename || "");
+    fd.append("player", playerInput.value);
+  } else {
+    const file = fileInput.files && fileInput.files[0];
+    if (file) fd.append("file", file);
+    fd.append("player", playerInput.value);
+  }
   submitBtn.disabled = true;
   statusLine.textContent = "";
   showProgress();
